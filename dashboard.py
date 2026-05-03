@@ -493,37 +493,50 @@ def _generate_pdf_inner(
     ]))
     story += [hdr, Spacer(1, 0.5*cm)]
 
-    # ── KPI grid ──
+    # ── KPI grid (2 rows × 4 cols) ──
     spend   = kpis.get("spend", 0)
     revenue = kpis.get("revenue", 0)
     roas    = kpis.get("roas", 0)
     conv    = kpis.get("conversions", 0)
     cpa     = kpis.get("cpa", 0)
+    impr    = kpis.get("impressions", 0)
+    clicks  = kpis.get("clicks", 0)
+    ctr     = kpis.get("ctr", 0)
+    avg_cpc = kpis.get("avg_cpc", 0)
     roas_c  = C_GREEN if roas >= 3 else C_YELLOW if roas >= 1.5 else C_RED
     cpa_c   = C_GREEN if 0 < cpa <= 120 else C_YELLOW if cpa <= 300 else C_RED if cpa > 300 else C_MID
 
     def kpi_col(lbl, val, color=C_DARK):
         return [Paragraph(lbl, metric_l),
                 Paragraph(f"<font color='#{color.hexval()[2:]}'>{val}</font>",
-                          sty("KV","Helvetica-Bold",15,color,TA_CENTER,20))]
+                          sty("KV","Helvetica-Bold",14,color,TA_CENTER,18))]
 
-    kpi_data = [[
-        kpi_col("Total Spend",    fmt_currency(spend)),
-        kpi_col("Revenue",        fmt_currency(revenue)),
-        kpi_col("ROAS",           f"{roas:.2f}×",  roas_c),
-        kpi_col("Purchases",      f"{conv:.0f}"),
-        kpi_col("CPA",            fmt_currency(cpa) if conv > 0 else "—", cpa_c),
+    kpi_row1 = [[
+        kpi_col("Total Spend",   fmt_currency(spend)),
+        kpi_col("Impressions",   fmt_number(impr)),
+        kpi_col("Clicks",        fmt_number(clicks)),
+        kpi_col("CTR",           f"{ctr:.2f}%"),
     ]]
-    kpi_tbl = Table(kpi_data, colWidths=[W/5]*5)
-    kpi_tbl.setStyle(TableStyle([
+    kpi_row2 = [[
+        kpi_col("Avg. CPC",      fmt_currency(avg_cpc)),
+        kpi_col("Conversions",   f"{conv:.0f}"),
+        kpi_col("CPA",           fmt_currency(cpa) if conv > 0 else "—", cpa_c),
+        kpi_col("ROAS",          f"{roas:.2f}×", roas_c),
+    ]]
+    kpi_style = TableStyle([
         ("BOX",          (0,0),(-1,-1), 1,   C_BORDER),
         ("INNERGRID",    (0,0),(-1,-1), 0.5, C_BORDER),
-        ("TOPPADDING",   (0,0),(-1,-1), 10),
-        ("BOTTOMPADDING",(0,0),(-1,-1), 10),
+        ("TOPPADDING",   (0,0),(-1,-1), 9),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 9),
         ("BACKGROUND",   (0,0),(-1,-1), C_WHITE),
-        ("ROUNDEDCORNERS", [8]),
-    ]))
-    story += [kpi_tbl, Spacer(1, 0.45*cm)]
+        ("ROUNDEDCORNERS", [6]),
+    ])
+    for kd in (kpi_row1, kpi_row2):
+        t = Table(kd, colWidths=[W/4]*4)
+        t.setStyle(kpi_style)
+        story.append(t)
+        story.append(Spacer(1, 0.18*cm))
+    story.append(Spacer(1, 0.28*cm))
 
     # ── Daily chart ──
     chart_bytes = _chart_image(df_daily)
@@ -547,54 +560,87 @@ def _generate_pdf_inner(
                   "weak":"🔴 Pause","paused":"⏸","insufficient":"🔵"}
 
     camp_rows = [
-        [Paragraph(h, sty("TH","Helvetica-Bold",7.5,C_MID,TA_LEFT))
-         for h in ["Campaign","Status","Spend","CTR","ROAS","Decision (Arabic)","Action"]]
+        [Paragraph(h, sty("TH","Helvetica-Bold",8,C_MID,TA_LEFT))
+         for h in ["Campaign", "Status", "Spend", "ROAS", "Conversions", "CTR"]]
     ]
     active = df_camp[df_camp["Status"] == "ENABLED"].sort_values("Cost", ascending=False)
     for idx, row in active.iterrows():
         d      = decisions.get(idx, {})
+        roas_v = d.get("roas", 0)
+        roas_c2= C_GREEN if roas_v >= 3 else C_RED
         tier   = d.get("tier", "moderate")
         tc     = TIER_COLOR.get(tier, C_MID)
         tl     = TIER_LABEL.get(tier, "")
-        roas_v = d.get("roas", 0)
-        roas_s = f"{roas_v:.1f}×"
-        cpa_fmt= fmt_currency(row["CPA"]) if row["CPA"] > 0 else "—"
 
         camp_rows.append([
-            Paragraph(row["Campaign"][:32], tbl_c),
+            Paragraph(row["Campaign"][:40], tbl_c),
             Paragraph(f"<font color='#{tc.hexval()[2:]}'>{tl}</font>",
-                      sty("ST","Helvetica-Bold",7.5,tc,TA_LEFT)),
+                      sty("ST","Helvetica-Bold",8,tc,TA_LEFT)),
             Paragraph(f"SAR {row['Cost']:.0f}", tbl_c),
+            Paragraph(f"<font color='#{roas_c2.hexval()[2:]}'>{roas_v:.1f}×</font>",
+                      sty("RV","Helvetica-Bold",8,roas_c2,TA_LEFT)),
+            Paragraph(f"{row['Conversions']:.0f}", tbl_c),
             Paragraph(f"{row['CTR']:.2f}%", tbl_c),
-            Paragraph(roas_s, tbl_c),
-            Paragraph(ar(d.get("decision","")),
-                      sty("AD2", ar_font, 8.5, tc, TA_RIGHT, leading=13)),
-            Paragraph(ar(d.get("action","")[:60]),
-                      sty("AC2", ar_font, 7.5, C_MID, TA_RIGHT, leading=12)),
         ])
 
     if len(camp_rows) > 1:
-        cw = [W*0.19, W*0.11, W*0.09, W*0.07, W*0.07, W*0.25, W*0.22]
+        cw = [W*0.38, W*0.15, W*0.13, W*0.12, W*0.12, W*0.10]
         c_tbl = Table(camp_rows, colWidths=cw, repeatRows=1)
         c_tbl.setStyle(TableStyle([
-            ("BACKGROUND",   (0,0),(-1,0),  C_LIGHT),
+            ("BACKGROUND",    (0,0),(-1,0),  C_LIGHT),
             ("ROWBACKGROUNDS",(0,1),(-1,-1), [C_WHITE, HexColor("#f8fafc")]),
-            ("BOX",          (0,0),(-1,-1), 0.5, C_BORDER),
-            ("INNERGRID",    (0,0),(-1,-1), 0.5, C_BORDER),
-            ("TOPPADDING",   (0,0),(-1,-1), 6),
-            ("BOTTOMPADDING",(0,0),(-1,-1), 6),
-            ("LEFTPADDING",  (0,0),(-1,-1), 6),
-            ("RIGHTPADDING", (0,0),(-1,-1), 6),
-            ("VALIGN",       (0,0),(-1,-1), "TOP"),
+            ("BOX",           (0,0),(-1,-1), 0.5, C_BORDER),
+            ("INNERGRID",     (0,0),(-1,-1), 0.5, C_BORDER),
+            ("TOPPADDING",    (0,0),(-1,-1), 7),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 7),
+            ("LEFTPADDING",   (0,0),(-1,-1), 8),
+            ("RIGHTPADDING",  (0,0),(-1,-1), 8),
+            ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
         ]))
         story.append(c_tbl)
 
-    # ── ROAS summary section ──
+    # ── AI Recommendations section ──
+    ai_rows = [d for d in decisions.values()
+               if d.get("tier") not in ("paused", "insufficient")]
+    if ai_rows:
+        story += [Spacer(1, 0.4*cm),
+                  Paragraph("<b>AI Recommendations  —  توصيات الذكاء الاصطناعي</b>",
+                             sty("AIH","Helvetica-Bold",10,C_DARK,leading=16)),
+                  Spacer(1, 0.18*cm)]
+        rec_rows = [[Paragraph(h, sty("RH","Helvetica-Bold",8,C_MID,TA_LEFT))
+                     for h in ["Campaign", "Decision", "Action"]]]
+        for idx, d in decisions.items():
+            if d.get("tier") in ("paused", "insufficient"):
+                continue
+            cname = df_camp.loc[idx, "Campaign"] if idx in df_camp.index else ""
+            tc = TIER_COLOR.get(d.get("tier","moderate"), C_MID)
+            rec_rows.append([
+                Paragraph(str(cname)[:38], tbl_c),
+                Paragraph(ar(d.get("decision", "")),
+                          sty("RD", ar_font, 8, tc, TA_RIGHT, leading=13)),
+                Paragraph(ar(d.get("action", "")[:70]),
+                          sty("RA", ar_font, 7.5, C_MID, TA_RIGHT, leading=12)),
+            ])
+        if len(rec_rows) > 1:
+            r_tbl = Table(rec_rows, colWidths=[W*0.28, W*0.36, W*0.36], repeatRows=1)
+            r_tbl.setStyle(TableStyle([
+                ("BACKGROUND",    (0,0),(-1,0),  C_LIGHT),
+                ("ROWBACKGROUNDS",(0,1),(-1,-1), [C_WHITE, HexColor("#f8fafc")]),
+                ("BOX",           (0,0),(-1,-1), 0.5, C_BORDER),
+                ("INNERGRID",     (0,0),(-1,-1), 0.5, C_BORDER),
+                ("TOPPADDING",    (0,0),(-1,-1), 6),
+                ("BOTTOMPADDING", (0,0),(-1,-1), 6),
+                ("LEFTPADDING",   (0,0),(-1,-1), 8),
+                ("RIGHTPADDING",  (0,0),(-1,-1), 8),
+                ("VALIGN",        (0,0),(-1,-1), "TOP"),
+            ]))
+            story.append(r_tbl)
+
+    # ── ROAS summary + footer ──
     story += [Spacer(1, 0.45*cm),
-              HRFlowable(width=W, thickness=0.5, color=C_BORDER)]
-    story.append(Spacer(1, 0.2*cm))
-    roas_status = ("Good Performance ✓" if roas >= 3 else
-                   "Below Target ⚠" if roas < 3 else "—")
+              HRFlowable(width=W, thickness=0.5, color=C_BORDER),
+              Spacer(1, 0.2*cm)]
+    roas_status = "Good Performance ✓" if roas >= 3 else "Below Target ⚠"
     roas_sc = C_GREEN if roas >= 3 else C_RED
     story.append(Table([[
         Paragraph(f"Period ROAS: <b>{roas:.2f}×</b>  —  "
@@ -603,6 +649,16 @@ def _generate_pdf_inner(
         Paragraph(f"Generated: {datetime.now().strftime('%b %d, %Y %H:%M')}",
                   sty("GD","Helvetica",8,C_MID,TA_RIGHT)),
     ]], colWidths=[W*0.65, W*0.35]))
+
+    story += [Spacer(1, 0.35*cm),
+              HRFlowable(width=W, thickness=0.5, color=C_BORDER),
+              Spacer(1, 0.15*cm)]
+    story.append(Table([[
+        Paragraph("Generated by <b>Ads Intelligence</b>",
+                  sty("FL","Helvetica",8,C_MID,TA_LEFT)),
+        Paragraph("ads-dashboard.yousefzaiter.com",
+                  sty("FR","Helvetica",8,C_BLUE,TA_RIGHT)),
+    ]], colWidths=[W*0.5, W*0.5]))
 
     doc.build(story)
     return buf.getvalue()
@@ -1301,8 +1357,12 @@ roas         = (total_cv / total_spend) if total_spend else 0
 # ── Action Buttons (PDF / Send) ───────────────────────────────────────────────
 _pdf_key = (selected_client, start_str, end_str, vis)
 if st.session_state.get("_pdf_cache_key") != _pdf_key:
-    _kpis_dict = dict(spend=total_spend, revenue=total_cv, roas=roas,
-                      conversions=total_conv, cpa=cpa)
+    _kpis_dict = dict(
+        spend=total_spend, revenue=total_cv, roas=roas,
+        conversions=total_conv, cpa=cpa,
+        impressions=total_impr, clicks=total_clicks,
+        ctr=avg_ctr, avg_cpc=avg_cpc,
+    )
     _decisions = {i: ai_decision(row) for i, row in df_active.iterrows()}
     st.session_state["_pdf_bytes"]     = generate_pdf(
         selected_client, start_str, end_str,
@@ -1314,15 +1374,37 @@ _pdf_bytes = st.session_state["_pdf_bytes"]
 # filename always uses real name — it's a local file, not shown on screen
 _fn = f"report_{selected_client}_{end_str}.pdf".replace(" ", "_")
 
+_wa_msg = (
+    f"مرحباً،\n"
+    f"هذا ملخص أداء حملاتك الإعلانية:\n\n"
+    f"📅 الفترة: {start_str} → {end_str}\n"
+    f"💰 الإنفاق: {fmt_currency(total_spend)}\n"
+    f"👁️ الظهور: {fmt_number(total_impr)}\n"
+    f"🖱️ النقرات: {fmt_number(total_clicks)}\n"
+    f"📈 ROAS: {roas:.2f}x\n"
+    f"✅ التحويلات: {total_conv:.0f}\n\n"
+    f"🔗 لمشاهدة التقرير الكامل:\n"
+    f"https://ads-dashboard.yousefzaiter.com\n\n"
+    f"Ads Intelligence ⚡"
+)
+_wa_url = f"https://wa.me/?text={urllib.parse.quote(_wa_msg)}"
+
 _ab1, _ab2, _ab_rest = st.columns([1, 1, 4])
 with _ab1:
     st.download_button("📥 Download PDF", data=_pdf_bytes,
                        file_name=_fn, mime="application/pdf",
                        use_container_width=True)
 with _ab2:
-    # Pass real name — it goes directly to the client
-    if st.button("📤 Send to Client", use_container_width=True, key="send_btn"):
-        send_modal(_pdf_bytes, selected_client, start_str, end_str)
+    st.markdown(
+        f'<a href="{_wa_url}" target="_blank" '
+        f'style="display:inline-flex;align-items:center;justify-content:center;gap:6px;'
+        f'width:100%;height:38px;background:linear-gradient(135deg,#1a2e20,#1e3525);'
+        f'border:1px solid rgba(63,185,80,0.3);border-radius:10px;'
+        f'font-size:12px;font-weight:600;color:rgba(63,185,80,0.9);'
+        f'text-decoration:none;transition:all 0.22s ease;">'
+        f'📤 Send to Client</a>',
+        unsafe_allow_html=True,
+    )
 
 # ── KPI Cards ─────────────────────────────────────────────────────────────────
 st.markdown('<div class="sec-label">Key Metrics</div>', unsafe_allow_html=True)
