@@ -5,6 +5,8 @@ import urllib.parse
 import requests
 import pandas as pd
 import streamlit as st
+from auth import check_auth, logout, show_login_page
+from users import get_user
 import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib
@@ -34,6 +36,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── Auth gate ─────────────────────────────────────────────────────────────────
+if not check_auth():
+    show_login_page()
+    st.stop()
 
 # ── Premium CSS ───────────────────────────────────────────────────────────────
 st.markdown("""
@@ -1117,32 +1124,63 @@ with st.sidebar:
 
     vis_sidebar = st.session_state.get("client_name_visible", False)
 
-    # Red glow on the dropdown when privacy mode is on
-    if not vis_sidebar:
-        st.markdown("""
-        <style>
-        [data-testid="stSidebar"] div[data-baseweb="select"] > div {
-          border: 1px solid #ff4d4f !important;
-          box-shadow: 0 0 8px rgba(255,77,79,0.3) !important;
-        }
-        </style>
-        """, unsafe_allow_html=True)
+    # ── Logout ────────────────────────────────────────────────────────────────
+    current_username = st.session_state.get("username", "")
+    user_info = get_user(current_username)
 
-    client_options = [
-        {"id": cid, "name": name,
-         "display": mask_name(name, vis_sidebar)}
-        for name, cid in clients.items()
-    ]
+    col_user, col_logout = st.columns([2, 1])
+    col_user.markdown(
+        f"<div style='font-size:12px;color:rgba(255,255,255,0.4);padding-top:6px'>"
+        f"👤 {current_username}</div>",
+        unsafe_allow_html=True,
+    )
+    if col_logout.button("Logout", use_container_width=True):
+        logout()
 
-    sel = st.selectbox(
-        "CLIENT",
-        options=client_options,
-        format_func=lambda x: x["display"],
-        label_visibility="visible",
-        key="selected_client")
+    st.divider()
 
-    selected_client      = sel["name"]
-    selected_customer_id = sel["id"]
+    # ── Client selector (admin: dropdown / client: locked) ────────────────────
+    if user_info.get("role") == "admin":
+        # Red glow on the dropdown when privacy mode is on
+        if not vis_sidebar:
+            st.markdown("""
+            <style>
+            [data-testid="stSidebar"] div[data-baseweb="select"] > div {
+              border: 1px solid #ff4d4f !important;
+              box-shadow: 0 0 8px rgba(255,77,79,0.3) !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
+        client_options = [
+            {"id": cid, "name": name,
+             "display": mask_name(name, vis_sidebar)}
+            for name, cid in clients.items()
+        ]
+        sel = st.selectbox(
+            "CLIENT",
+            options=client_options,
+            format_func=lambda x: x["display"],
+            label_visibility="visible",
+            key="selected_client")
+        selected_client      = sel["name"]
+        selected_customer_id = sel["id"]
+    else:
+        # Client user: locked to their assigned account
+        assigned_cid = user_info.get("client_id", "")
+        assigned_name = next(
+            (n for n, c in clients.items() if c == assigned_cid),
+            assigned_cid,
+        )
+        selected_client      = assigned_name
+        selected_customer_id = assigned_cid
+        st.markdown(
+            f"<div style='font-size:11px;color:rgba(255,255,255,0.3);letter-spacing:1px;"
+            f"text-transform:uppercase;margin-bottom:4px'>Client</div>"
+            f"<div style='font-size:14px;color:#f0f6fc;font-weight:600'>"
+            f"{mask_name(assigned_name, vis_sidebar)}</div>",
+            unsafe_allow_html=True,
+        )
     st.divider()
 
     today = date.today()
