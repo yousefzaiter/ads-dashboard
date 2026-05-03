@@ -1186,6 +1186,7 @@ def campaign_card(row: pd.Series, d: dict) -> str:
 
 # ── Session state ─────────────────────────────────────────────────────────────
 st.session_state.setdefault("client_name_visible", False)
+st.session_state.setdefault("_show_send_panel", False)
 
 # ── Auth (needed early for client list) ───────────────────────────────────────
 try:
@@ -1374,6 +1375,7 @@ roas         = (total_cv / total_spend) if total_spend else 0
 # ── Action Buttons (PDF / Send) ───────────────────────────────────────────────
 _pdf_key = (selected_client, start_str, end_str, vis)
 if st.session_state.get("_pdf_cache_key") != _pdf_key:
+    st.session_state["_show_send_panel"] = False  # reset on client/date change
     _kpis_dict = dict(
         spend=total_spend, revenue=total_cv, roas=roas,
         conversions=total_conv, cpa=cpa,
@@ -1391,20 +1393,23 @@ _pdf_bytes = st.session_state["_pdf_bytes"]
 # filename always uses real name — it's a local file, not shown on screen
 _fn = f"report_{selected_client}_{end_str}.pdf".replace(" ", "_")
 
+# WhatsApp-safe emojis only (📅 👁️ 🖱️ ⚡ render as ? on many devices)
 _wa_msg = (
-    f"مرحباً،\n"
-    f"هذا ملخص أداء حملاتك الإعلانية:\n\n"
-    f"📅 الفترة: {start_str} → {end_str}\n"
+    "مرحباً،\n"
+    "هذا ملخص أداء حملاتك الإعلانية:\n\n"
+    f"📊 الفترة: {start_str} - {end_str}\n"
     f"💰 الإنفاق: {fmt_currency(total_spend)}\n"
-    f"👁️ الظهور: {fmt_number(total_impr)}\n"
-    f"🖱️ النقرات: {fmt_number(total_clicks)}\n"
+    f"📊 الظهور: {fmt_number(total_impr)}\n"
+    f"📊 النقرات: {fmt_number(total_clicks)}\n"
     f"📈 ROAS: {roas:.2f}x\n"
     f"✅ التحويلات: {total_conv:.0f}\n\n"
-    f"🔗 لمشاهدة التقرير الكامل:\n"
-    f"https://ads-dashboard.yousefzaiter.com\n\n"
-    f"Ads Intelligence ⚡"
+    "📎 التقرير المفصّل مرفق في الأسفل\n\n"
+    "🔗 لمشاهدة التقرير التفاعلي:\n"
+    "https://ads-dashboard.yousefzaiter.com\n\n"
+    "Ads Intelligence"
 )
-_wa_url = f"https://wa.me/?text={urllib.parse.quote(_wa_msg)}"
+# safe='' encodes everything including slashes and emoji as %XX sequences
+_wa_url = f"https://wa.me/?text={urllib.parse.quote(_wa_msg, safe='')}"
 
 _ab1, _ab2, _ab_rest = st.columns([1, 1, 4])
 with _ab1:
@@ -1412,16 +1417,54 @@ with _ab1:
                        file_name=_fn, mime="application/pdf",
                        use_container_width=True)
 with _ab2:
-    st.markdown(
-        f'<a href="{_wa_url}" target="_blank" '
-        f'style="display:inline-flex;align-items:center;justify-content:center;gap:6px;'
-        f'width:100%;height:38px;background:linear-gradient(135deg,#1a2e20,#1e3525);'
-        f'border:1px solid rgba(63,185,80,0.3);border-radius:10px;'
-        f'font-size:12px;font-weight:600;color:rgba(63,185,80,0.9);'
-        f'text-decoration:none;transition:all 0.22s ease;">'
-        f'📤 Send to Client</a>',
-        unsafe_allow_html=True,
-    )
+    if st.button("📤 Send to Client", use_container_width=True, key="send_btn"):
+        st.session_state["_show_send_panel"] = True
+
+# ── Two-step send panel ───────────────────────────────────────────────────────
+if st.session_state.get("_show_send_panel"):
+    st.markdown("""
+    <div style='background:#0d1018;border:1px solid rgba(63,185,80,0.18);
+                border-radius:14px;padding:20px 24px;margin:10px 0 4px'>
+      <div style='font-size:13px;font-weight:700;color:#3fb950;margin-bottom:14px'>
+        📤 إرسال التقرير للعميل — خطوتان
+      </div>
+      <div style='display:flex;gap:10px;align-items:flex-start;margin-bottom:10px'>
+        <div style='width:22px;height:22px;background:#3fb950;border-radius:50%;
+                    display:flex;align-items:center;justify-content:center;
+                    font-size:11px;font-weight:800;color:#07090f;flex-shrink:0'>1</div>
+        <div style='font-size:12.5px;color:rgba(255,255,255,0.6);line-height:1.5'>
+          حمّل ملف PDF أدناه أولاً ثم أرفقه يدوياً في محادثة واتساب
+        </div>
+      </div>
+      <div style='display:flex;gap:10px;align-items:flex-start'>
+        <div style='width:22px;height:22px;background:#58a6ff;border-radius:50%;
+                    display:flex;align-items:center;justify-content:center;
+                    font-size:11px;font-weight:800;color:#07090f;flex-shrink:0'>2</div>
+        <div style='font-size:12.5px;color:rgba(255,255,255,0.6);line-height:1.5'>
+          افتح واتساب — الرسالة جاهزة ومملوءة بالأرقام، أرفق PDF من جهازك
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    _sp1, _sp2, _sp3 = st.columns([1, 1, 4])
+    with _sp1:
+        st.download_button(
+            "⬇️ تحميل PDF",
+            data=_pdf_bytes, file_name=_fn, mime="application/pdf",
+            use_container_width=True, key="send_panel_pdf_dl",
+        )
+    with _sp2:
+        st.markdown(
+            f'<a href="{_wa_url}" target="_blank" '
+            f'style="display:inline-flex;align-items:center;justify-content:center;gap:6px;'
+            f'width:100%;height:38px;background:linear-gradient(135deg,#1a2e20,#1e3525);'
+            f'border:1px solid rgba(63,185,80,0.35);border-radius:10px;'
+            f'font-size:12px;font-weight:700;color:#3fb950;'
+            f'text-decoration:none;">'
+            f'💬 فتح واتساب</a>',
+            unsafe_allow_html=True,
+        )
 
 # ── KPI Cards ─────────────────────────────────────────────────────────────────
 st.markdown('<div class="sec-label">Key Metrics</div>', unsafe_allow_html=True)
