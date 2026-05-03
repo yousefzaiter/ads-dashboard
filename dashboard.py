@@ -5,7 +5,7 @@ import urllib.parse
 import requests
 import pandas as pd
 import streamlit as st
-from auth import check_auth, logout, show_login_page
+from auth import build_authenticator, do_logout
 from users import get_user
 import plotly.express as px
 import plotly.graph_objects as go
@@ -38,8 +38,54 @@ st.set_page_config(
 )
 
 # ── Auth gate ─────────────────────────────────────────────────────────────────
-if not check_auth():
-    show_login_page()
+authenticator = build_authenticator()
+
+# Always call login() — it reads the cookie on refresh and restores the session.
+# If no valid cookie, it renders the login form in the main area.
+try:
+    authenticator.login()
+except Exception:
+    pass
+
+if st.session_state.get("authentication_status") is not True:
+    st.markdown("""
+    <style>
+    section[data-testid="stSidebar"] { display: none !important; }
+    [data-testid="stAppViewContainer"] { background: #07090f; }
+    /* Centre the stauth login form */
+    .main .block-container { max-width: 420px !important; margin: 80px auto 0 !important; }
+    /* Style the form card */
+    div[data-testid="stForm"] {
+        background: #111624;
+        border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 18px;
+        padding: 32px 28px 24px;
+    }
+    div[data-testid="stForm"] h1,
+    div[data-testid="stForm"] h2 { color: #f0f6fc !important; text-align: center; }
+    div[data-testid="stForm"] input {
+        background: #0d1117 !important;
+        border: 1px solid rgba(255,255,255,0.1) !important;
+        color: #f0f6fc !important;
+        border-radius: 8px !important;
+    }
+    div[data-testid="stForm"] button {
+        background: linear-gradient(135deg, #1f6feb, #388bfd) !important;
+        border: none !important;
+        border-radius: 8px !important;
+        font-weight: 700 !important;
+        color: #fff !important;
+    }
+    </style>
+    <div style='text-align:center;padding:0 0 24px'>
+      <div style='font-size:28px;font-weight:900;color:#f0f6fc;letter-spacing:-1px'>
+        ⚡ Ads Intelligence
+      </div>
+      <div style='font-size:13px;color:rgba(255,255,255,0.3);margin-top:6px'>
+        Sign in to access your dashboard
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
     st.stop()
 
 # ── Premium CSS ───────────────────────────────────────────────────────────────
@@ -162,14 +208,25 @@ st.markdown("""
 .tag-ok     { background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.35); border:1px solid rgba(255,255,255,0.1); }
 
 /* ── Sidebar ── */
-[data-testid="stSidebar"] {
+section[data-testid="stSidebar"] {
+  min-width: 280px !important;
+  max-width: 280px !important;
+  width: 280px !important;
   background: #080b12 !important;
   border-right: 1px solid rgba(255,255,255,0.04);
 }
-[data-testid="stSidebar"] * { color: rgba(255,255,255,0.65) !important; }
-[data-testid="stSidebar"] .st
-Selectbox label,
-[data-testid="stSidebar"] .stToggle label { color: rgba(255,255,255,0.4) !important; font-size: 11px !important; letter-spacing: 0.8px; }
+section[data-testid="stSidebar"] > div {
+  min-width: 280px !important;
+  padding: 1.5rem 1rem !important;
+}
+section[data-testid="stSidebar"] * { color: rgba(255,255,255,0.65) !important; }
+section[data-testid="stSidebar"] .stSelectbox label,
+section[data-testid="stSidebar"] .stToggle label {
+  color: rgba(255,255,255,0.4) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.8px;
+}
+button[kind="secondary"] { white-space: nowrap !important; }
 
 /* ── Buttons ── */
 .stButton > button {
@@ -1135,7 +1192,7 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     if col_logout.button("Logout", use_container_width=True):
-        logout()
+        do_logout(authenticator)
 
     st.divider()
 
