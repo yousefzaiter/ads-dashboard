@@ -1393,22 +1393,28 @@ _pdf_bytes = st.session_state["_pdf_bytes"]
 # filename always uses real name — it's a local file, not shown on screen
 _fn = f"report_{selected_client}_{end_str}.pdf".replace(" ", "_")
 
-# WhatsApp-safe emojis only (📅 👁️ 🖱️ ⚡ render as ? on many devices)
+_sep = "━" * 22   # ━━━━━━━━━━━━━━━━━━━━━━
+_cpa_str = fmt_currency(cpa) if total_conv > 0 else "-"
 _wa_msg = (
-    "مرحباً،\n"
-    "هذا ملخص أداء حملاتك الإعلانية:\n\n"
-    f"📊 الفترة: {start_str} - {end_str}\n"
-    f"💰 الإنفاق: {fmt_currency(total_spend)}\n"
-    f"📊 الظهور: {fmt_number(total_impr)}\n"
-    f"📊 النقرات: {fmt_number(total_clicks)}\n"
-    f"📈 ROAS: {roas:.2f}x\n"
-    f"✅ التحويلات: {total_conv:.0f}\n\n"
-    "📎 التقرير المفصّل مرفق في الأسفل\n\n"
-    "🔗 لمشاهدة التقرير التفاعلي:\n"
-    "https://ads-dashboard.yousefzaiter.com\n\n"
-    "Ads Intelligence"
+    f"{_sep}\n"
+    f"📊 تقرير أداء الحملات\n"
+    f"{selected_client}\n"
+    f"{_sep}\n\n"
+    f"🗓 الفترة: {start_str} - {end_str}\n\n"
+    f"💰 الإنفاق:      {fmt_currency(total_spend)}\n"
+    f"👁 الظهور:       {fmt_number(total_impr)}\n"
+    f"🖱 النقرات:      {fmt_number(total_clicks)}\n"
+    f"📊 CTR:          {avg_ctr:.2f}%\n"
+    f"📈 ROAS:         {roas:.2f}x\n"
+    f"✅ التحويلات:     {total_conv:.0f}\n"
+    f"💡 CPA:          {_cpa_str}\n\n"
+    f"{_sep}\n"
+    f"🔗 التقرير الكامل:\n"
+    f"https://ads-dashboard.yousefzaiter.com\n"
+    f"{_sep}\n"
+    f"Ads Intelligence ⚡"
 )
-# safe='' encodes everything including slashes and emoji as %XX sequences
+# safe='' encodes every non-ASCII char (emoji, Arabic, separators) as %XX
 _wa_url = f"https://wa.me/?text={urllib.parse.quote(_wa_msg, safe='')}"
 
 _ab1, _ab2, _ab_rest = st.columns([1, 1, 4])
