@@ -5,7 +5,7 @@ import urllib.parse
 import requests
 import pandas as pd
 import streamlit as st
-from auth import build_authenticator, do_logout
+from auth import check_auth, do_logout, show_login_page
 from users import get_user
 import plotly.express as px
 import plotly.graph_objects as go
@@ -38,54 +38,8 @@ st.set_page_config(
 )
 
 # ── Auth gate ─────────────────────────────────────────────────────────────────
-authenticator = build_authenticator()
-
-# Always call login() — it reads the cookie on refresh and restores the session.
-# If no valid cookie, it renders the login form in the main area.
-try:
-    authenticator.login()
-except Exception:
-    pass
-
-if st.session_state.get("authentication_status") is not True:
-    st.markdown("""
-    <style>
-    section[data-testid="stSidebar"] { display: none !important; }
-    [data-testid="stAppViewContainer"] { background: #07090f; }
-    /* Centre the stauth login form */
-    .main .block-container { max-width: 420px !important; margin: 80px auto 0 !important; }
-    /* Style the form card */
-    div[data-testid="stForm"] {
-        background: #111624;
-        border: 1px solid rgba(255,255,255,0.07);
-        border-radius: 18px;
-        padding: 32px 28px 24px;
-    }
-    div[data-testid="stForm"] h1,
-    div[data-testid="stForm"] h2 { color: #f0f6fc !important; text-align: center; }
-    div[data-testid="stForm"] input {
-        background: #0d1117 !important;
-        border: 1px solid rgba(255,255,255,0.1) !important;
-        color: #f0f6fc !important;
-        border-radius: 8px !important;
-    }
-    div[data-testid="stForm"] button {
-        background: linear-gradient(135deg, #1f6feb, #388bfd) !important;
-        border: none !important;
-        border-radius: 8px !important;
-        font-weight: 700 !important;
-        color: #fff !important;
-    }
-    </style>
-    <div style='text-align:center;padding:0 0 24px'>
-      <div style='font-size:28px;font-weight:900;color:#f0f6fc;letter-spacing:-1px'>
-        ⚡ Ads Intelligence
-      </div>
-      <div style='font-size:13px;color:rgba(255,255,255,0.3);margin-top:6px'>
-        Sign in to access your dashboard
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+if not check_auth():
+    show_login_page()
     st.stop()
 
 # ── Premium CSS ───────────────────────────────────────────────────────────────
@@ -1192,7 +1146,7 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     if col_logout.button("Logout", use_container_width=True):
-        do_logout(authenticator)
+        do_logout()
 
     st.divider()
 
