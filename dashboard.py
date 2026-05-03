@@ -333,68 +333,69 @@ def _register_arabic_font() -> str:
 
 # ── Chart image for PDF ───────────────────────────────────────────────────────
 def _chart_image(df_daily: pd.DataFrame) -> bytes | None:
-    if df_daily.empty:
+    if df_daily is None or df_daily.empty or len(df_daily) < 2:
         return None
-    df = df_daily.copy()
-    df["ROAS"] = df.apply(
-        lambda r: round(r["Conv. Value"] / r["Cost"], 2) if r["Cost"] > 0 else 0.0,
-        axis=1)
+    try:
+        df = df_daily.copy()
+        df["ROAS"] = df.apply(
+            lambda r: round(r["Conv. Value"] / r["Cost"], 2) if r["Cost"] > 0 else 0.0,
+            axis=1)
 
-    fig, ax1 = plt.subplots(figsize=(10, 3.2))
-    ax2 = ax1.twinx()
-    fig.patch.set_facecolor("#f8fafc")
-    ax1.set_facecolor("#f8fafc")
+        dates = list(df["Date"].dt.to_pydatetime())
+        if len(dates) < 2:
+            return None
 
-    dates = df["Date"].dt.to_pydatetime()
+        fig, ax1 = plt.subplots(figsize=(10, 3.2))
+        ax2 = ax1.twinx()
+        fig.patch.set_facecolor("#f8fafc")
+        ax1.set_facecolor("#f8fafc")
 
-    if len(dates) == 0:
-        plt.close()
-        return None
+        ax1.fill_between(dates, df["Cost"], alpha=0.2, color="#3b82f6")
+        ax1.plot(dates, df["Cost"],        color="#3b82f6", lw=2, label="Spend")
+        ax1.plot(dates, df["Conv. Value"], color="#22c55e", lw=2, label="Revenue")
 
-    ax1.fill_between(dates, df["Cost"], alpha=0.2, color="#3b82f6")
-    ax1.plot(dates, df["Cost"],         color="#3b82f6", lw=2,   label="Spend")
-    ax1.plot(dates, df["Conv. Value"],  color="#22c55e", lw=2,   label="Revenue")
+        cost_max = df["Cost"].max()
+        conv_max = df["Conversions"].max()
+        if cost_max > 0 and conv_max > 0:
+            ax1.bar(dates, df["Conversions"] * (cost_max / conv_max * 0.4),
+                    color="#f59e0b", alpha=0.35, width=0.6, label="Purchases (scaled)")
 
-    cost_max = df["Cost"].max()
-    conv_max = df["Conversions"].max()
-    if cost_max > 0 and conv_max > 0:
-        ax1.bar(dates, df["Conversions"] * (cost_max / conv_max * 0.4),
-                color="#f59e0b", alpha=0.35, width=0.6, label="Purchases (scaled)")
-
-    if len(df) > 1:
         for i in range(len(df) - 1):
             c = "#22c55e" if df["ROAS"].iloc[i] >= 3 else "#ef4444"
             ax2.plot(dates[i:i+2], df["ROAS"].iloc[i:i+2], color=c, lw=2.5)
 
-    ax2.axhline(y=3, color="#94a3b8", lw=1, linestyle="--", alpha=0.6)
-    if len(dates) > 0:
-        ax2.text(dates[-1], 3.05, "3×", color="#94a3b8", fontsize=7, ha="right")
+        ax2.axhline(y=3, color="#94a3b8", lw=1, linestyle="--", alpha=0.6)
+        ax2.text(dates[-1], 3.05, "3x", color="#94a3b8", fontsize=7, ha="right")
 
-    ax1.set_ylabel("SAR", color="#64748b", fontsize=8)
-    ax2.set_ylabel("ROAS", color="#64748b", fontsize=8)
-    for ax in (ax1, ax2):
-        ax.tick_params(labelsize=7, colors="#94a3b8")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.spines["left"].set_color("#e2e8f0")
-        ax.spines["bottom"].set_color("#e2e8f0")
-    ax1.grid(axis="y", alpha=0.3, color="#e2e8f0", linestyle="--")
-    ax2.grid(False)
+        ax1.set_ylabel("SAR", color="#64748b", fontsize=8)
+        ax2.set_ylabel("ROAS", color="#64748b", fontsize=8)
+        for ax in (ax1, ax2):
+            ax.tick_params(labelsize=7, colors="#94a3b8")
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_color("#e2e8f0")
+            ax.spines["bottom"].set_color("#e2e8f0")
+        ax1.grid(axis="y", alpha=0.3, color="#e2e8f0", linestyle="--")
+        ax2.grid(False)
 
-    legend_lines = [Line2D([0],[0],color="#3b82f6",lw=2),
-                    Line2D([0],[0],color="#22c55e",lw=2),
-                    Line2D([0],[0],color="#f59e0b",lw=6,alpha=0.5),
-                    Line2D([0],[0],color="#64748b",lw=2)]
-    ax1.legend(legend_lines, ["Spend","Revenue","Purchases","ROAS"],
-               loc="upper left", framealpha=0.9, fontsize=7,
-               facecolor="#f8fafc", edgecolor="#e2e8f0")
+        legend_lines = [Line2D([0],[0],color="#3b82f6",lw=2),
+                        Line2D([0],[0],color="#22c55e",lw=2),
+                        Line2D([0],[0],color="#f59e0b",lw=6,alpha=0.5),
+                        Line2D([0],[0],color="#64748b",lw=2)]
+        ax1.legend(legend_lines, ["Spend","Revenue","Purchases","ROAS"],
+                   loc="upper left", framealpha=0.9, fontsize=7,
+                   facecolor="#f8fafc", edgecolor="#e2e8f0")
 
-    plt.tight_layout(pad=0.4)
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight",
-                facecolor="#f8fafc")
-    plt.close()
-    return buf.getvalue()
+        plt.tight_layout(pad=0.4)
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                    facecolor="#f8fafc")
+        plt.close()
+        return buf.getvalue()
+    except Exception as e:
+        print(f"Chart generation error: {e}")
+        plt.close("all")
+        return None
 
 
 # ── PDF generation ────────────────────────────────────────────────────────────
