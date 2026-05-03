@@ -407,21 +407,27 @@ def generate_pdf(
     df_daily: pd.DataFrame,
     show_name: bool = True,
 ) -> bytes:
+    import traceback
     try:
         return _generate_pdf_inner(
             client_name, start_str, end_str, kpis,
             df_camp, decisions, df_daily, show_name)
     except Exception as exc:
-        # Return a minimal error PDF rather than crashing the page
+        tb = traceback.format_exc()
+        print(f"PDF ERROR: {tb}")
+        # Return a minimal fallback PDF with the error message
         buf = io.BytesIO()
-        from reportlab.platypus import SimpleDocTemplate
-        from reportlab.lib.pagesizes import A4
         doc = SimpleDocTemplate(buf, pagesize=A4)
-        from reportlab.platypus import Paragraph
-        from reportlab.lib.styles import getSampleStyleSheet
-        doc.build([Paragraph(f"PDF generation error: {exc}",
-                             getSampleStyleSheet()["Normal"])])
-        return buf.getvalue()
+        styles = getSampleStyleSheet()
+        doc.build([
+            Paragraph("PDF generation error", styles["Heading1"]),
+            Paragraph(str(exc), styles["Normal"]),
+            Paragraph(tb.replace("\n", "<br/>"), styles["Code"]),
+        ])
+        buf.seek(0)
+        pdf_bytes = buf.getvalue()
+        buf.close()
+        return pdf_bytes
 
 
 def _generate_pdf_inner(
@@ -473,18 +479,23 @@ def _generate_pdf_inner(
     ar_dec   = sty("AD", ar_font,           10, C_DARK, TA_RIGHT, leading=16)
     ar_rsn   = sty("AR", ar_font,            8, C_MID,  TA_RIGHT, leading=13)
 
-    display_client = client_name if show_name else "████████"
+    display_client = client_name if show_name else "*** Hidden ***"
+
+    def _hx(color) -> str:
+        """Convert ReportLab color to 6-digit HTML hex (no 0x prefix)."""
+        return f"{int(round(color.red*255)):02x}{int(round(color.green*255)):02x}{int(round(color.blue*255)):02x}"
 
     # ── Header banner ──
+    # IMPORTANT: only use Latin-1-safe chars here — Helvetica can't render
+    # emoji, arrows, Arabic glyphs or other non-Latin-1 code points.
     hdr = Table([[
-        Paragraph(f"<b>⚡ Ads Intelligence</b>", sty("HH","Helvetica-Bold",14,C_DARK)),
-        Paragraph(
-            f"{display_client}   ·   {start_str} → {end_str}",
-            sty("HS","Helvetica",9,C_MID, TA_RIGHT)),
+        Paragraph("<b>Ads Intelligence</b>",
+                  sty("HH", "Helvetica-Bold", 14, C_DARK)),
+        Paragraph(f"{display_client}   |   {start_str} to {end_str}",
+                  sty("HS", "Helvetica", 9, C_MID, TA_RIGHT)),
     ]], colWidths=[W*0.55, W*0.45])
     hdr.setStyle(TableStyle([
-        ("BACKGROUND",  (0,0),(-1,-1), C_LIGHT),
-        ("ROUNDEDCORNERS", [8]),
+        ("BACKGROUND",   (0,0),(-1,-1), C_LIGHT),
         ("LEFTPADDING",  (0,0),(-1,-1), 14),
         ("RIGHTPADDING", (0,0),(-1,-1), 14),
         ("TOPPADDING",   (0,0),(-1,-1), 12),
@@ -508,20 +519,20 @@ def _generate_pdf_inner(
 
     def kpi_col(lbl, val, color=C_DARK):
         return [Paragraph(lbl, metric_l),
-                Paragraph(f"<font color='#{color.hexval()[2:]}'>{val}</font>",
-                          sty("KV","Helvetica-Bold",14,color,TA_CENTER,18))]
+                Paragraph(f"<font color='#{_hx(color)}'>{val}</font>",
+                          sty("KV", "Helvetica-Bold", 14, color, TA_CENTER, 18))]
 
     kpi_row1 = [[
-        kpi_col("Total Spend",   fmt_currency(spend)),
-        kpi_col("Impressions",   fmt_number(impr)),
-        kpi_col("Clicks",        fmt_number(clicks)),
-        kpi_col("CTR",           f"{ctr:.2f}%"),
+        kpi_col("Total Spend",  fmt_currency(spend)),
+        kpi_col("Impressions",  fmt_number(impr)),
+        kpi_col("Clicks",       fmt_number(clicks)),
+        kpi_col("CTR",          f"{ctr:.2f}%"),
     ]]
     kpi_row2 = [[
-        kpi_col("Avg. CPC",      fmt_currency(avg_cpc)),
-        kpi_col("Conversions",   f"{conv:.0f}"),
-        kpi_col("CPA",           fmt_currency(cpa) if conv > 0 else "—", cpa_c),
-        kpi_col("ROAS",          f"{roas:.2f}×", roas_c),
+        kpi_col("Avg. CPC",     fmt_currency(avg_cpc)),
+        kpi_col("Conversions",  f"{conv:.0f}"),
+        kpi_col("CPA",          fmt_currency(cpa) if conv > 0 else "-", cpa_c),
+        kpi_col("ROAS",         f"{roas:.2f}x", roas_c),
     ]]
     kpi_style = TableStyle([
         ("BOX",          (0,0),(-1,-1), 1,   C_BORDER),
@@ -529,7 +540,6 @@ def _generate_pdf_inner(
         ("TOPPADDING",   (0,0),(-1,-1), 9),
         ("BOTTOMPADDING",(0,0),(-1,-1), 9),
         ("BACKGROUND",   (0,0),(-1,-1), C_WHITE),
-        ("ROUNDEDCORNERS", [6]),
     ])
     for kd in (kpi_row1, kpi_row2):
         t = Table(kd, colWidths=[W/4]*4)
@@ -548,16 +558,18 @@ def _generate_pdf_inner(
         story.append(RLImage(img_buf, width=W, height=W*0.3))
         story.append(Spacer(1, 0.45*cm))
 
-    # ── Campaign intelligence table ──
+    # ── Campaign Performance table ──
     story.append(Paragraph(
-        "<b>Campaign Intelligence  —  توصيات الذكاء الاصطناعي</b>",
-        sty("CI","Helvetica-Bold",10,C_DARK,leading=16)))
+        "<b>Campaign Performance</b>",
+        sty("CI", "Helvetica-Bold", 10, C_DARK, leading=16)))
     story.append(Spacer(1, 0.2*cm))
 
     TIER_COLOR = {"strong": C_GREEN, "moderate": C_YELLOW,
                   "weak": C_RED, "paused": C_MID, "insufficient": C_BLUE}
-    TIER_LABEL = {"strong":"🟢 Scale","moderate":"🟡 Optimize",
-                  "weak":"🔴 Pause","paused":"⏸","insufficient":"🔵"}
+    # ASCII-safe labels only — Helvetica cannot render emoji or Arabic
+    TIER_LABEL = {"strong": "Scale Up", "moderate": "Optimize",
+                  "weak": "Pause/Fix", "paused": "Paused",
+                  "insufficient": "No Data"}
 
     camp_rows = [
         [Paragraph(h, sty("TH","Helvetica-Bold",8,C_MID,TA_LEFT))
@@ -573,12 +585,12 @@ def _generate_pdf_inner(
         tl     = TIER_LABEL.get(tier, "")
 
         camp_rows.append([
-            Paragraph(row["Campaign"][:40], tbl_c),
-            Paragraph(f"<font color='#{tc.hexval()[2:]}'>{tl}</font>",
-                      sty("ST","Helvetica-Bold",8,tc,TA_LEFT)),
+            Paragraph(str(row["Campaign"])[:40], tbl_c),
+            Paragraph(f"<font color='#{_hx(tc)}'>{tl}</font>",
+                      sty("ST", "Helvetica-Bold", 8, tc)),
             Paragraph(f"SAR {row['Cost']:.0f}", tbl_c),
-            Paragraph(f"<font color='#{roas_c2.hexval()[2:]}'>{roas_v:.1f}×</font>",
-                      sty("RV","Helvetica-Bold",8,roas_c2,TA_LEFT)),
+            Paragraph(f"<font color='#{_hx(roas_c2)}'>{roas_v:.1f}x</font>",
+                      sty("RV", "Helvetica-Bold", 8, roas_c2)),
             Paragraph(f"{row['Conversions']:.0f}", tbl_c),
             Paragraph(f"{row['CTR']:.2f}%", tbl_c),
         ])
@@ -604,8 +616,8 @@ def _generate_pdf_inner(
                if d.get("tier") not in ("paused", "insufficient")]
     if ai_rows:
         story += [Spacer(1, 0.4*cm),
-                  Paragraph("<b>AI Recommendations  —  توصيات الذكاء الاصطناعي</b>",
-                             sty("AIH","Helvetica-Bold",10,C_DARK,leading=16)),
+                  Paragraph("<b>AI Recommendations</b>",
+                             sty("AIH", "Helvetica-Bold", 10, C_DARK, leading=16)),
                   Spacer(1, 0.18*cm)]
         rec_rows = [[Paragraph(h, sty("RH","Helvetica-Bold",8,C_MID,TA_LEFT))
                      for h in ["Campaign", "Decision", "Action"]]]
@@ -640,14 +652,15 @@ def _generate_pdf_inner(
     story += [Spacer(1, 0.45*cm),
               HRFlowable(width=W, thickness=0.5, color=C_BORDER),
               Spacer(1, 0.2*cm)]
-    roas_status = "Good Performance ✓" if roas >= 3 else "Below Target ⚠"
+    roas_status = "Good Performance" if roas >= 3 else "Below Target"
     roas_sc = C_GREEN if roas >= 3 else C_RED
     story.append(Table([[
-        Paragraph(f"Period ROAS: <b>{roas:.2f}×</b>  —  "
-                  f"<font color='#{roas_sc.hexval()[2:]}'>{roas_status}</font>",
-                  sty("RS","Helvetica",9,C_DARK)),
+        Paragraph(
+            f"Period ROAS: <b>{roas:.2f}x</b>  -  "
+            f"<font color='#{_hx(roas_sc)}'>{roas_status}</font>",
+            sty("RS", "Helvetica", 9, C_DARK)),
         Paragraph(f"Generated: {datetime.now().strftime('%b %d, %Y %H:%M')}",
-                  sty("GD","Helvetica",8,C_MID,TA_RIGHT)),
+                  sty("GD", "Helvetica", 8, C_MID, TA_RIGHT)),
     ]], colWidths=[W*0.65, W*0.35]))
 
     story += [Spacer(1, 0.35*cm),
@@ -661,7 +674,10 @@ def _generate_pdf_inner(
     ]], colWidths=[W*0.5, W*0.5]))
 
     doc.build(story)
-    return buf.getvalue()
+    buf.seek(0)
+    pdf_bytes = buf.getvalue()
+    buf.close()
+    return pdf_bytes
 
 
 # ── Email sending ─────────────────────────────────────────────────────────────
