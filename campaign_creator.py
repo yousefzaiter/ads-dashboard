@@ -219,6 +219,8 @@ def _build_prompt(
         else ""
     )
 
+    needs_search = campaign_type == "Search"
+
     expected = {
         "headlines": ["headline text"] * 15,
         "descriptions": ["description text"] * 4,
@@ -230,6 +232,15 @@ def _build_prompt(
         "asset_groups": (["Asset Group Name"] * 3) if needs_pmax else [],
         "youtube_desc": ("youtube description text") if needs_dgen else "",
         "thumbnail_angles": (["visual concept description"] * 3) if needs_dgen else [],
+        "keywords": (
+            {
+                "exact":  ["exact keyword"] * 10,
+                "phrase": ["phrase keyword"] * 10,
+                "broad":  ["broad keyword"] * 10,
+            }
+            if needs_search else {}
+        ),
+        "negative_keywords": (["negative keyword"] * 10) if needs_search else [],
     }
 
     rules = [
@@ -243,6 +254,12 @@ def _build_prompt(
         rules.append("Exactly 3 audience_signals and 3 asset_groups")
     if needs_dgen:
         rules.append("Exactly 1 youtube_desc (≤200 chars) and 3 thumbnail_angles")
+    if needs_search:
+        rules.append(
+            "Exactly 10 exact match, 10 phrase match, 10 broad match keywords, "
+            "and 10 negative keywords — relevant to the product/landing page. "
+            "Write keywords as plain text only (no brackets, quotes, or minus signs — those are added by the UI)"
+        )
     rules.append(f"Write all copy in: {language}")
     rules.append("No pipes (|) in any text field")
     rules.append("Return ONLY the JSON object — no markdown, no explanation")
@@ -370,6 +387,19 @@ def _copy_all_text(result: dict, campaign_type: str) -> str:
         for a in result.get("thumbnail_angles", []):
             lines.append(f"• {a}")
 
+    kw = result.get("keywords", {})
+    neg = result.get("negative_keywords", [])
+    if kw or neg:
+        lines += ["", "--- KEYWORDS (Google Ads Editor format) ---"]
+        for k in kw.get("exact", []):
+            lines.append(f"[{k}]")
+        for k in kw.get("phrase", []):
+            lines.append(f'"{k}"')
+        for k in kw.get("broad", []):
+            lines.append(k)
+        for k in neg:
+            lines.append(f"-{k}")
+
     return "\n".join(lines)
 
 
@@ -442,6 +472,52 @@ def _render_long_headlines(lhls: list) -> None:
         c2.markdown(_char_badge(lhl, 90), unsafe_allow_html=True)
         with c3:
             copy_to_clipboard(lhl, f"cp_lhl_{i}")
+
+
+def _render_keywords(result: dict) -> None:
+    kw  = result.get("keywords", {})
+    neg = result.get("negative_keywords", [])
+    if not kw and not neg:
+        return
+
+    _section_header("Keywords — Search Campaign")
+
+    groups = [
+        ("Exact Match",     kw.get("exact",  []), lambda k: f"[{k}]"),
+        ("Phrase Match",    kw.get("phrase", []), lambda k: f'"{k}"'),
+        ("Broad Match",     kw.get("broad",  []), lambda k: k),
+        ("Negative Keywords", neg,                lambda k: f"-{k}"),
+    ]
+
+    for label, items, fmt in groups:
+        if not items:
+            continue
+        st.markdown(f"**{label}**")
+        for i, kw_text in enumerate(items[:10]):
+            display = fmt(kw_text)
+            c1, c2 = st.columns([10, 0.5])
+            c1.text_input(" ", value=display, key=f"kw_{label[:3]}_{i}",
+                          label_visibility="collapsed")
+            with c2:
+                copy_to_clipboard(display, f"cp_kw_{label[:3]}_{i}")
+
+        # Copy all in this match type
+        all_in_group = "\n".join(fmt(k) for k in items[:10])
+        copy_to_clipboard(all_in_group, f"cp_kw_{label[:3]}_all")
+        st.caption(f"^ Copy all {label}")
+        st.markdown("")
+
+    # Copy all keywords formatted for Google Ads Editor
+    all_kw_lines = (
+        [f"[{k}]" for k in kw.get("exact",  [])[:10]] +
+        [f'"{k}"' for k in kw.get("phrase", [])[:10]] +
+        [k         for k in kw.get("broad",  [])[:10]] +
+        [f"-{k}"  for k in neg[:10]]
+    )
+    _section_header("Copy All Keywords (Google Ads Editor format)")
+    st.text_area(" ", value="\n".join(all_kw_lines), height=200,
+                 key="kw_copy_all_area", label_visibility="collapsed")
+    copy_to_clipboard("\n".join(all_kw_lines), "cp_kw_all_final")
 
 
 def _render_pmax_extras(result: dict) -> None:
@@ -701,6 +777,9 @@ def render_campaign_creator() -> None:
     _render_headlines(result.get("headlines", []))
     _render_descriptions(result.get("descriptions", []))
     _render_sitelinks(result.get("sitelinks", []))
+
+    if ctype == "Search":
+        _render_keywords(result)
 
     if ctype in ("Performance Max", "Demand Gen"):
         _render_long_headlines(result.get("long_headlines", []))
