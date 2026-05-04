@@ -1330,18 +1330,23 @@ with st.sidebar:
         st.divider()
         _page = st.radio(
             "NAVIGATE",
-            ["📊  Dashboard", "⚙️  Admin Panel"],
-            index=st.session_state.get("_nav_page_idx", 0),
+            ["📊  Dashboard", "✍️  Campaign Creator", "⚙️  Admin Panel"],
+            index=0,
             key="_nav_page",
             label_visibility="visible",
         )
     else:
         _page = "📊  Dashboard"
 
-# ── Admin Panel page ──────────────────────────────────────────────────────────
+# ── Page routing (admin-only pages) ───────────────────────────────────────────
 if _page == "⚙️  Admin Panel":
     from admin_panel import render_admin_panel
     render_admin_panel()
+    st.stop()
+
+if _page == "✍️  Campaign Creator":
+    from campaign_creator import render_campaign_creator
+    render_campaign_creator()
     st.stop()
 
 # ── Header ────────────────────────────────────────────────────────────────────

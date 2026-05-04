@@ -18,3 +18,7 @@ pandas>=2.1.4
 reportlab>=4.0.0
 arabic-reshaper>=3.0.0
 python-bidi>=0.4.2
+
+# Campaign Creator
+anthropic>=0.25.0
+beautifulsoup4>=4.12.0
