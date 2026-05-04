@@ -1197,21 +1197,39 @@ except Exception as e:
 
 clients = fetch_clients(token, dev_token, root_cid, mcc_id)
 
+# ── Role helpers ──────────────────────────────────────────────────────────────
+_current_username = st.session_state.get("username", "")
+_user_info        = get_user(_current_username)
+_is_admin         = _user_info.get("role") == "admin"
+_display_name     = _user_info.get("display_name", _current_username)
+
+# Clean the URL for client users — token is already in session_state
+if not _is_admin and st.query_params.get("token"):
+    st.query_params.clear()
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("""
-    <div style='padding:4px 0 20px'>
-      <div style='font-size:17px;font-weight:800;color:#f0f6fc;letter-spacing:-0.5px'>⚡ Ads Intelligence</div>
-      <div style='font-size:11px;color:rgba(255,255,255,0.3);margin-top:3px'>Media Buying Dashboard</div>
-    </div>
-    """, unsafe_allow_html=True)
+    if _is_admin:
+        st.markdown("""
+        <div style='padding:4px 0 20px'>
+          <div style='font-size:17px;font-weight:800;color:#f0f6fc;letter-spacing:-0.5px'>⚡ Ads Intelligence</div>
+          <div style='font-size:11px;color:rgba(255,255,255,0.3);margin-top:3px'>Media Buying Dashboard</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div style='padding:4px 0 20px'>
+          <div style='font-size:17px;font-weight:800;color:#f0f6fc;letter-spacing:-0.5px'>{_display_name}</div>
+          <div style='font-size:11px;color:rgba(255,255,255,0.3);margin-top:3px;direction:rtl'>تقرير الأداء الإعلاني</div>
+        </div>
+        """, unsafe_allow_html=True)
     st.divider()
 
     vis_sidebar = st.session_state.get("client_name_visible", False)
 
     # ── Logout ────────────────────────────────────────────────────────────────
-    current_username = st.session_state.get("username", "")
-    user_info = get_user(current_username)
+    current_username = _current_username
+    user_info        = _user_info
 
     col_user, col_logout = st.columns([2, 1])
     col_user.markdown(
@@ -1251,22 +1269,17 @@ with st.sidebar:
         selected_client      = sel["name"]
         selected_customer_id = sel["id"]
     else:
-        # Client user: locked to their assigned account
+        # Client user: locked to their assigned account — no sidebar display needed
         assigned_cid = user_info.get("client_id", "")
         assigned_name = next(
             (n for n, c in clients.items() if c == assigned_cid),
-            assigned_cid,
+            _display_name,
         )
         selected_client      = assigned_name
         selected_customer_id = assigned_cid
-        st.markdown(
-            f"<div style='font-size:11px;color:rgba(255,255,255,0.3);letter-spacing:1px;"
-            f"text-transform:uppercase;margin-bottom:4px'>Client</div>"
-            f"<div style='font-size:14px;color:#f0f6fc;font-weight:600'>"
-            f"{mask_name(assigned_name, vis_sidebar)}</div>",
-            unsafe_allow_html=True,
-        )
-    st.divider()
+
+    if _is_admin:
+        st.divider()
 
     today = date.today()
     preset = st.selectbox("DATE RANGE", [
@@ -1299,25 +1312,26 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-    st.markdown("""
-    <div style='margin-top:24px;padding:14px;background:rgba(255,255,255,0.03);
-                border-radius:12px;border:1px solid rgba(255,255,255,0.05)'>
-      <div style='font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:1px;
-                  text-transform:uppercase;margin-bottom:8px'>Data source</div>
-      <div style='font-size:11.5px;color:rgba(255,255,255,0.45);font-weight:500'>
-        Google Ads API v20</div>
-      <div style='font-size:10.5px;color:rgba(255,255,255,0.2);margin-top:2px'>
-        Auto-refresh every 5 min</div>
-    </div>
-    """, unsafe_allow_html=True)
+    if _is_admin:
+        st.markdown("""
+        <div style='margin-top:24px;padding:14px;background:rgba(255,255,255,0.03);
+                    border-radius:12px;border:1px solid rgba(255,255,255,0.05)'>
+          <div style='font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:1px;
+                      text-transform:uppercase;margin-bottom:8px'>Data source</div>
+          <div style='font-size:11.5px;color:rgba(255,255,255,0.45);font-weight:500'>
+            Google Ads API v20</div>
+          <div style='font-size:10.5px;color:rgba(255,255,255,0.2);margin-top:2px'>
+            Auto-refresh every 5 min</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # ── Admin Panel nav (admin-only) ──────────────────────────────────────────
-    if user_info.get("role") == "admin":
+    if _is_admin:
         st.divider()
         _page = st.radio(
             "NAVIGATE",
             ["📊  Dashboard", "⚙️  Admin Panel"],
-            index=0,
+            index=st.session_state.get("_nav_page_idx", 0),
             key="_nav_page",
             label_visibility="visible",
         )
@@ -1334,35 +1348,50 @@ if _page == "⚙️  Admin Panel":
 start_str = start_date.strftime("%Y-%m-%d")
 end_str   = end_date.strftime("%Y-%m-%d")
 
-vis = st.session_state["client_name_visible"]
+vis = st.session_state["client_name_visible"] if _is_admin else True
 
 col_h1, col_h2 = st.columns([3, 1])
 with col_h1:
-    st.markdown(f"""
-    <div style='padding:8px 0 4px'>
-      <div style='font-size:26px;font-weight:900;color:#f0f6fc;letter-spacing:-1px;line-height:1'>
-        Campaign Performance
-      </div>
-      <div style='font-size:13px;color:rgba(255,255,255,0.28);margin-top:5px;font-weight:400;
-                  display:flex;align-items:center;gap:8px;flex-wrap:wrap'>
-        <span style='font-weight:600;color:rgba(255,255,255,0.55)'>{mask_name(selected_client, vis)}</span>
-        <span style='color:rgba(255,255,255,0.12)'>·</span>
-        <span style='font-size:11.5px'>{mask_name(selected_customer_id, vis)}</span>
-        <span style='color:rgba(255,255,255,0.12)'>·</span>
-        <span>{start_date.strftime("%b %d")} – {end_date.strftime("%b %d, %Y")}</span>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    if _is_admin:
+        st.markdown(f"""
+        <div style='padding:8px 0 4px'>
+          <div style='font-size:26px;font-weight:900;color:#f0f6fc;letter-spacing:-1px;line-height:1'>
+            Campaign Performance
+          </div>
+          <div style='font-size:13px;color:rgba(255,255,255,0.28);margin-top:5px;font-weight:400;
+                      display:flex;align-items:center;gap:8px;flex-wrap:wrap'>
+            <span style='font-weight:600;color:rgba(255,255,255,0.55)'>{mask_name(selected_client, vis)}</span>
+            <span style='color:rgba(255,255,255,0.12)'>·</span>
+            <span style='font-size:11.5px'>{mask_name(selected_customer_id, vis)}</span>
+            <span style='color:rgba(255,255,255,0.12)'>·</span>
+            <span>{start_date.strftime("%b %d")} – {end_date.strftime("%b %d, %Y")}</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div style='padding:8px 0 4px'>
+          <div style='font-size:26px;font-weight:900;color:#f0f6fc;letter-spacing:-1px;line-height:1;
+                      direction:rtl'>تقرير الأداء الإعلاني</div>
+          <div style='font-size:13px;color:rgba(255,255,255,0.28);margin-top:5px;font-weight:400;
+                      display:flex;align-items:center;gap:8px;flex-wrap:wrap'>
+            <span style='font-weight:600;color:rgba(255,255,255,0.55)'>{_display_name}</span>
+            <span style='color:rgba(255,255,255,0.12)'>·</span>
+            <span>{start_date.strftime("%b %d")} – {end_date.strftime("%b %d, %Y")}</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 with col_h2:
     st.markdown("""
     <div style='display:flex;justify-content:flex-end;align-items:flex-start;padding-top:10px;gap:10px'>
       <div class='pill-live'><span class='dot-pulse'></span>Live</div>
     </div>
     """, unsafe_allow_html=True)
-    eye_label = "🙈 Hide Client" if vis else "👁 Show Client"
-    if st.button(eye_label, use_container_width=True, key="toggle_vis_btn"):
-        st.session_state["client_name_visible"] = not vis
-        st.rerun()
+    if _is_admin:
+        eye_label = "🙈 Hide Client" if vis else "👁 Show Client"
+        if st.button(eye_label, use_container_width=True, key="toggle_vis_btn"):
+            st.session_state["client_name_visible"] = not vis
+            st.rerun()
 
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 

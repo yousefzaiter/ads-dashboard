@@ -12,25 +12,27 @@ def _session_store() -> dict:
 
 
 def check_auth() -> bool:
-    """Read the token from the URL query param and validate it.
-    If valid, restores session_state['username'] and returns True.
-    Call this on every page load before rendering anything protected.
+    """Read the token from the URL query param or session_state and validate it.
+    Storing the token in session_state lets us clear the URL for a cleaner client
+    experience without breaking the session on subsequent reruns.
     """
-    token = st.query_params.get("token", "")
+    token = st.query_params.get("token", "") or st.session_state.get("_auth_token", "")
     if not token:
         return False
     username = _session_store().get(token)
     if username:
         st.session_state["username"] = username
+        st.session_state["_auth_token"] = token  # persist so URL can be cleared
         return True
     return False
 
 
 def do_logout() -> None:
     """Invalidate the session token, clear the URL, and rerun."""
-    token = st.query_params.get("token", "")
+    token = st.query_params.get("token", "") or st.session_state.get("_auth_token", "")
     _session_store().pop(token, None)
     st.session_state.pop("username", None)
+    st.session_state.pop("_auth_token", None)
     st.query_params.clear()
     st.rerun()
 
