@@ -124,15 +124,23 @@ def _char_badge(text: str, limit: int) -> str:
     )
 
 
-def _js_copy(text: str, key: str) -> None:
-    """Render a 📋 button; on click inject a <script> that copies text to clipboard."""
+def copy_to_clipboard(text: str, key: str) -> None:
+    """Render a 📋 button; on click use execCommand fallback for reliable copy."""
     import streamlit.components.v1 as components
     if st.button("📋", key=key, help="Copy to clipboard"):
-        safe = json.dumps(text)          # handles quotes, newlines, backslashes
+        escaped = text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
         components.html(
-            f"<script>navigator.clipboard.writeText({safe});</script>",
+            f"""<script>
+            const el = document.createElement('textarea');
+            el.value = "{escaped}";
+            document.body.appendChild(el);
+            el.select();
+            document.execCommand('copy');
+            document.body.removeChild(el);
+            </script>""",
             height=0,
         )
+        st.toast("✅ Copied!", icon="📋")
 
 
 def _section_header(title: str) -> None:
@@ -389,7 +397,7 @@ def _render_headlines(headlines: list) -> None:
             unsafe_allow_html=True,
         )
         with c4:
-            _js_copy(hl, f"cp_hl_{i}")
+            copy_to_clipboard(hl, f"cp_hl_{i}")
 
 
 def _render_descriptions(descs: list) -> None:
@@ -399,7 +407,7 @@ def _render_descriptions(descs: list) -> None:
         c1.text_input(" ", value=d, key=f"desc_{i}", label_visibility="collapsed")
         c2.markdown(_char_badge(d, 90), unsafe_allow_html=True)
         with c3:
-            _js_copy(d, f"cp_desc_{i}")
+            copy_to_clipboard(d, f"cp_desc_{i}")
 
 
 def _render_sitelinks(sitelinks: list) -> None:
@@ -408,27 +416,33 @@ def _render_sitelinks(sitelinks: list) -> None:
         t  = sl.get("title", "")
         d1 = sl.get("desc1", "")
         d2 = sl.get("desc2", "")
-        with st.expander(f"Sitelink {i + 1}: {t}"):
-            r1, r1b, r1c = st.columns([6, 1.2, 0.5])
-            r1.text_input("Title (25)", value=t, key=f"sl_t_{i}")
-            r1b.markdown(_char_badge(t, 25), unsafe_allow_html=True)
-            with r1c:
-                _js_copy(t, f"cp_sl_t_{i}")
 
-            r2, r2b, r2c = st.columns([6, 1.2, 0.5])
-            r2.text_input("Desc 1 (35)", value=d1, key=f"sl_d1_{i}")
-            r2b.markdown(_char_badge(d1, 35), unsafe_allow_html=True)
-            with r2c:
-                _js_copy(d1, f"cp_sl_d1_{i}")
+        st.markdown(f"**🔗 Sitelink {i + 1}**")
 
-            r3, r3b, r3c = st.columns([6, 1.2, 0.5])
-            r3.text_input("Desc 2 (35)", value=d2, key=f"sl_d2_{i}")
-            r3b.markdown(_char_badge(d2, 35), unsafe_allow_html=True)
-            with r3c:
-                _js_copy(d2, f"cp_sl_d2_{i}")
+        r1, r1b, r1c = st.columns([6, 1.2, 0.5])
+        r1.text_input("Title (max 25 chars)", value=t, key=f"sl_t_{i}")
+        r1b.markdown(_char_badge(t, 25), unsafe_allow_html=True)
+        with r1c:
+            copy_to_clipboard(t, f"cp_sl_t_{i}")
 
-            _js_copy(f"{t}\n{d1}\n{d2}", f"cp_sl_all_{i}")
-            st.caption("^ Copy all 3 fields")
+        r2, r2b, r2c = st.columns([6, 1.2, 0.5])
+        r2.text_input("Desc 1 (max 35 chars)", value=d1, key=f"sl_d1_{i}")
+        r2b.markdown(_char_badge(d1, 35), unsafe_allow_html=True)
+        with r2c:
+            copy_to_clipboard(d1, f"cp_sl_d1_{i}")
+
+        r3, r3b, r3c = st.columns([6, 1.2, 0.5])
+        r3.text_input("Desc 2 (max 35 chars)", value=d2, key=f"sl_d2_{i}")
+        r3b.markdown(_char_badge(d2, 35), unsafe_allow_html=True)
+        with r3c:
+            copy_to_clipboard(d2, f"cp_sl_d2_{i}")
+
+        ca, cb = st.columns([9, 1])
+        ca.caption("Copy all 3 fields:")
+        with cb:
+            copy_to_clipboard(f"{t}\n{d1}\n{d2}", f"cp_sl_all_{i}")
+
+        st.markdown("---")
 
 
 def _render_long_headlines(lhls: list) -> None:
@@ -438,7 +452,7 @@ def _render_long_headlines(lhls: list) -> None:
         c1.text_input(" ", value=lhl, key=f"lhl_{i}", label_visibility="collapsed")
         c2.markdown(_char_badge(lhl, 90), unsafe_allow_html=True)
         with c3:
-            _js_copy(lhl, f"cp_lhl_{i}")
+            copy_to_clipboard(lhl, f"cp_lhl_{i}")
 
 
 def _render_pmax_extras(result: dict) -> None:
@@ -449,7 +463,7 @@ def _render_pmax_extras(result: dict) -> None:
             c1, c2 = st.columns([10, 0.5])
             c1.text_input(" ", value=s, key=f"sig_{i}", label_visibility="collapsed")
             with c2:
-                _js_copy(s, f"cp_sig_{i}")
+                copy_to_clipboard(s, f"cp_sig_{i}")
 
     groups = result.get("asset_groups", [])
     if groups:
@@ -458,7 +472,7 @@ def _render_pmax_extras(result: dict) -> None:
             c1, c2 = st.columns([10, 0.5])
             c1.text_input(" ", value=g, key=f"ag_{i}", label_visibility="collapsed")
             with c2:
-                _js_copy(g, f"cp_ag_{i}")
+                copy_to_clipboard(g, f"cp_ag_{i}")
 
 
 def _render_dgen_extras(result: dict) -> None:
@@ -469,7 +483,7 @@ def _render_dgen_extras(result: dict) -> None:
         c1.text_area(" ", value=yt, key="yt_desc", height=80, label_visibility="collapsed")
         c2.markdown(_char_badge(yt, 200), unsafe_allow_html=True)
         with c3:
-            _js_copy(yt, "cp_yt")
+            copy_to_clipboard(yt, "cp_yt")
 
     angles = result.get("thumbnail_angles", [])
     if angles:
@@ -478,7 +492,7 @@ def _render_dgen_extras(result: dict) -> None:
             c1, c2 = st.columns([10, 0.5])
             c1.text_input(" ", value=a, key=f"thumb_{i}", label_visibility="collapsed")
             with c2:
-                _js_copy(a, f"cp_thumb_{i}")
+                copy_to_clipboard(a, f"cp_thumb_{i}")
 
 
 # ── History panel ─────────────────────────────────────────────────────────────
@@ -547,7 +561,13 @@ def _render_history() -> None:
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def render_campaign_creator() -> None:
+    # Fix Streamlit 1.57 bug: expander arrow icons render as literal text
     st.markdown("""
+    <style>
+    .streamlit-expanderHeader svg { display: none !important; }
+    [data-testid="stExpander"] summary span[data-testid="stExpanderToggleIcon"] { display: none !important; }
+    details > summary p:last-child { display: none !important; }
+    </style>
     <div style='padding:8px 0 20px'>
       <div style='font-size:26px;font-weight:900;color:#f0f6fc;letter-spacing:-1px'>
         ✍️ Campaign Creator
@@ -667,7 +687,7 @@ def render_campaign_creator() -> None:
     if "error" in result:
         st.error(f"Generation failed: {result['error']}")
         if "raw" in result:
-            with st.expander("Raw API response"):
+            with st.expander("Raw API response", expanded=False):
                 st.code(result["raw"])
         return
 
@@ -716,7 +736,7 @@ def render_campaign_creator() -> None:
         key="cc_copy_all",
         label_visibility="collapsed",
     )
-    _js_copy(all_text, "cp_all_final")
+    copy_to_clipboard(all_text, "cp_all_final")
 
     # ── Campaign name + Save ──────────────────────────────────────────────────
     st.markdown(
