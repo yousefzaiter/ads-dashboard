@@ -11,7 +11,7 @@ CLIENTS_FILE = os.path.join(os.path.dirname(__file__), "clients.json")
 # ── Storage helpers ───────────────────────────────────────────────────────────
 
 def _hash(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    return hashlib.sha256(password.strip().encode()).hexdigest()
 
 
 def load_clients() -> list[dict]:
