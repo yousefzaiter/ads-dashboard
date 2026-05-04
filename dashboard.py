@@ -1311,6 +1311,24 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Admin Panel nav (admin-only) ──────────────────────────────────────────
+    if user_info.get("role") == "admin":
+        st.divider()
+        _page = st.radio(
+            "NAVIGATE",
+            ["📊  Dashboard", "⚙️  Admin Panel"],
+            index=0,
+            key="_nav_page",
+            label_visibility="visible",
+        )
+    else:
+        _page = "📊  Dashboard"
+
+# ── Admin Panel page ──────────────────────────────────────────────────────────
+if _page == "⚙️  Admin Panel":
+    from admin_panel import render_admin_panel
+    render_admin_panel()
+    st.stop()
 
 # ── Header ────────────────────────────────────────────────────────────────────
 start_str = start_date.strftime("%Y-%m-%d")
