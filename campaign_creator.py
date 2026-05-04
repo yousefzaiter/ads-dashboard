@@ -125,22 +125,9 @@ def _char_badge(text: str, limit: int) -> str:
 
 
 def copy_to_clipboard(text: str, key: str) -> None:
-    """Render a 📋 button; on click use execCommand fallback for reliable copy."""
-    import streamlit.components.v1 as components
-    if st.button("📋", key=key, help="Copy to clipboard"):
-        escaped = text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
-        components.html(
-            f"""<script>
-            const el = document.createElement('textarea');
-            el.value = "{escaped}";
-            document.body.appendChild(el);
-            el.select();
-            document.execCommand('copy');
-            document.body.removeChild(el);
-            </script>""",
-            height=0,
-        )
-        st.toast("✅ Copied!", icon="📋")
+    """Stage text into the clipboard area — no JS needed."""
+    if st.button("📋", key=key, help="Stage for copying"):
+        st.session_state["clipboard"] = text
 
 
 def _section_header(title: str) -> None:
@@ -708,6 +695,27 @@ def render_campaign_creator() -> None:
     else:
         st.success("✅ All items within character limits")
 
+    # ── Clipboard staging area ────────────────────────────────────────────────
+    if "clipboard" in st.session_state and st.session_state["clipboard"]:
+        st.markdown(
+            "<div style='background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.3);"
+            "border-radius:10px;padding:4px 12px 2px;margin:12px 0 4px'>"
+            "<span style='font-size:11px;color:rgba(88,166,255,0.8);font-weight:600'>"
+            "📋 CLIPBOARD — Select All (Cmd+A / Ctrl+A) then Copy (Cmd+C / Ctrl+C)"
+            "</span></div>",
+            unsafe_allow_html=True,
+        )
+        st.text_area(
+            "clipboard_display",
+            value=st.session_state["clipboard"],
+            height=80,
+            key="clipboard_display",
+            label_visibility="collapsed",
+        )
+        if st.button("✕ Clear", key="clear_clipboard"):
+            st.session_state["clipboard"] = ""
+            st.rerun()
+
     _render_headlines(result.get("headlines", []))
     _render_descriptions(result.get("descriptions", []))
     _render_sitelinks(result.get("sitelinks", []))
@@ -736,7 +744,7 @@ def render_campaign_creator() -> None:
         key="cc_copy_all",
         label_visibility="collapsed",
     )
-    copy_to_clipboard(all_text, "cp_all_final")
+    st.caption("Select all text above (Cmd+A / Ctrl+A) then copy (Cmd+C / Ctrl+C)")
 
     # ── Campaign name + Save ──────────────────────────────────────────────────
     st.markdown(
