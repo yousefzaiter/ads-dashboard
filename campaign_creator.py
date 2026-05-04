@@ -1,10 +1,18 @@
 import json
 import os
 import re
+from datetime import datetime
+from pathlib import Path
 
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
+_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+print(f"[DEBUG] API Key loaded: {_api_key[:20] if _api_key else 'NOT FOUND'}")
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -35,6 +43,66 @@ SYSTEM_PROMPT = (
     "no explanation."
 )
 
+SAVED_CAMPAIGNS_FILE = Path(__file__).parent / "saved_campaigns.json"
+
+# ── Campaign history storage ───────────────────────────────────────────────────
+
+def _load_campaigns() -> list[dict]:
+    if not SAVED_CAMPAIGNS_FILE.exists():
+        return []
+    try:
+        return json.loads(SAVED_CAMPAIGNS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def _save_campaigns(campaigns: list[dict]) -> None:
+    SAVED_CAMPAIGNS_FILE.write_text(
+        json.dumps(campaigns, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _save_campaign(entry: dict) -> None:
+    campaigns = _load_campaigns()
+    # Replace if same name already exists
+    campaigns = [c for c in campaigns if c.get("campaign_name") != entry["campaign_name"]]
+    campaigns.insert(0, entry)
+    _save_campaigns(campaigns)
+
+
+def _delete_campaign(name: str) -> None:
+    campaigns = [c for c in _load_campaigns() if c.get("campaign_name") != name]
+    _save_campaigns(campaigns)
+
+
+# ── Campaign name generator ────────────────────────────────────────────────────
+
+_ANGLE_SHORT = {
+    "السعر / العرض (Price & Offer)":         "Price",
+    "الجودة / المصداقية (Quality & Trust)":  "Quality",
+    "حل مشكلة (Problem & Solution)":         "Solution",
+    "الندرة / الإلحاح (Scarcity & Urgency)": "Urgency",
+    "🤖 اقترح أنت (AI chooses best angle)":  "AI",
+}
+
+_TYPE_SHORT = {
+    "Performance Max": "PMax",
+    "Search":          "Search",
+    "Demand Gen":      "DemandGen",
+}
+
+
+def _suggest_campaign_name(page_data: dict, campaign_type: str, angle: str) -> str:
+    title = page_data.get("title", "") or page_data.get("meta_description", "")
+    # Take first meaningful word from the page title
+    words = re.sub(r"[^\w\s]", "", title).split()
+    product = words[0].capitalize() if words else "Campaign"
+    type_s  = _TYPE_SHORT.get(campaign_type, campaign_type.replace(" ", ""))
+    angle_s = _ANGLE_SHORT.get(angle, "Custom")
+    month   = datetime.now().strftime("%b%Y")
+    return f"{product}_{type_s}_{angle_s}_{month}"
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _rate(text: str) -> str:
@@ -56,24 +124,15 @@ def _char_badge(text: str, limit: int) -> str:
     )
 
 
-def _copy_btn(text: str, key: str) -> None:
-    safe = (
-        text.replace("\\", "\\\\")
-            .replace("'", "\\'")
-            .replace("\n", "\\n")
-            .replace("\r", "")
-    )
-    st.markdown(
-        f"<button onclick=\"navigator.clipboard.writeText('{safe}')"
-        f".then(()=>this.textContent='✅ Copied')"
-        f".catch(()=>this.textContent='❌');"
-        f"setTimeout(()=>this.textContent='Copy',1800)\" "
-        f"style='background:#1e2433;color:rgba(255,255,255,0.55);"
-        f"border:1px solid rgba(255,255,255,0.1);border-radius:6px;"
-        f"padding:3px 10px;font-size:11px;cursor:pointer;margin-top:2px'>"
-        f"Copy</button>",
-        unsafe_allow_html=True,
-    )
+def _js_copy(text: str, key: str) -> None:
+    """Render a 📋 button; on click inject a <script> that copies text to clipboard."""
+    import streamlit.components.v1 as components
+    if st.button("📋", key=key, help="Copy to clipboard"):
+        safe = json.dumps(text)          # handles quotes, newlines, backslashes
+        components.html(
+            f"<script>navigator.clipboard.writeText({safe});</script>",
+            height=0,
+        )
 
 
 def _section_header(title: str) -> None:
@@ -214,7 +273,7 @@ def call_claude(
     product_desc: str,
     language: str,
 ) -> dict:
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = _api_key or os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return {"error": "ANTHROPIC_API_KEY not set in .env"}
 
@@ -225,7 +284,7 @@ def call_claude(
         prompt = _build_prompt(campaign_type, angle, page, product_desc, language)
 
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=4096,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
@@ -322,7 +381,7 @@ def _copy_all_text(result: dict, campaign_type: str) -> str:
 def _render_headlines(headlines: list) -> None:
     _section_header(f"Headlines — {len(headlines)}/15  ·  max 30 chars each")
     for i, hl in enumerate(headlines[:15]):
-        c1, c2, c3, c4 = st.columns([4.5, 1.1, 0.55, 0.75])
+        c1, c2, c3, c4 = st.columns([8, 1.2, 0.6, 0.5])
         c1.text_input(" ", value=hl, key=f"hl_{i}", label_visibility="collapsed")
         c2.markdown(_char_badge(hl, 30), unsafe_allow_html=True)
         c3.markdown(
@@ -330,17 +389,17 @@ def _render_headlines(headlines: list) -> None:
             unsafe_allow_html=True,
         )
         with c4:
-            _copy_btn(hl, f"cp_hl_{i}")
+            _js_copy(hl, f"cp_hl_{i}")
 
 
 def _render_descriptions(descs: list) -> None:
     _section_header(f"Descriptions — {len(descs)}/4  ·  max 90 chars each")
     for i, d in enumerate(descs[:4]):
-        c1, c2, c3 = st.columns([5, 1.1, 0.75])
+        c1, c2, c3 = st.columns([8, 1.2, 0.5])
         c1.text_input(" ", value=d, key=f"desc_{i}", label_visibility="collapsed")
         c2.markdown(_char_badge(d, 90), unsafe_allow_html=True)
         with c3:
-            _copy_btn(d, f"cp_desc_{i}")
+            _js_copy(d, f"cp_desc_{i}")
 
 
 def _render_sitelinks(sitelinks: list) -> None:
@@ -349,30 +408,37 @@ def _render_sitelinks(sitelinks: list) -> None:
         t  = sl.get("title", "")
         d1 = sl.get("desc1", "")
         d2 = sl.get("desc2", "")
-        with st.expander(f"Sitelink {i + 1}  —  {t}", expanded=True):
-            r1, r1b = st.columns([4, 1])
+        with st.expander(f"Sitelink {i + 1}: {t}"):
+            r1, r1b, r1c = st.columns([6, 1.2, 0.5])
             r1.text_input("Title (25)", value=t, key=f"sl_t_{i}")
             r1b.markdown(_char_badge(t, 25), unsafe_allow_html=True)
+            with r1c:
+                _js_copy(t, f"cp_sl_t_{i}")
 
-            r2, r2b = st.columns([4, 1])
+            r2, r2b, r2c = st.columns([6, 1.2, 0.5])
             r2.text_input("Desc 1 (35)", value=d1, key=f"sl_d1_{i}")
             r2b.markdown(_char_badge(d1, 35), unsafe_allow_html=True)
+            with r2c:
+                _js_copy(d1, f"cp_sl_d1_{i}")
 
-            r3, r3b = st.columns([4, 1])
+            r3, r3b, r3c = st.columns([6, 1.2, 0.5])
             r3.text_input("Desc 2 (35)", value=d2, key=f"sl_d2_{i}")
             r3b.markdown(_char_badge(d2, 35), unsafe_allow_html=True)
+            with r3c:
+                _js_copy(d2, f"cp_sl_d2_{i}")
 
-            _copy_btn(f"{t}\n{d1}\n{d2}", f"cp_sl_{i}")
+            _js_copy(f"{t}\n{d1}\n{d2}", f"cp_sl_all_{i}")
+            st.caption("^ Copy all 3 fields")
 
 
 def _render_long_headlines(lhls: list) -> None:
     _section_header(f"Long Headlines — {len(lhls)}/5  ·  max 90 chars each")
     for i, lhl in enumerate(lhls[:5]):
-        c1, c2, c3 = st.columns([5, 1.1, 0.75])
+        c1, c2, c3 = st.columns([8, 1.2, 0.5])
         c1.text_input(" ", value=lhl, key=f"lhl_{i}", label_visibility="collapsed")
         c2.markdown(_char_badge(lhl, 90), unsafe_allow_html=True)
         with c3:
-            _copy_btn(lhl, f"cp_lhl_{i}")
+            _js_copy(lhl, f"cp_lhl_{i}")
 
 
 def _render_pmax_extras(result: dict) -> None:
@@ -380,45 +446,100 @@ def _render_pmax_extras(result: dict) -> None:
     if signals:
         _section_header("Audience Signals — 3 suggestions")
         for i, s in enumerate(signals[:3]):
-            st.markdown(
-                f"<div style='background:rgba(88,166,255,0.06);"
-                f"border:1px solid rgba(88,166,255,0.15);border-radius:10px;"
-                f"padding:10px 14px;margin-bottom:6px;font-size:13px;"
-                f"color:rgba(255,255,255,0.7)'><b style='color:rgba(88,166,255,0.8)'>"
-                f"{i+1}.</b> {s}</div>",
-                unsafe_allow_html=True,
-            )
+            c1, c2 = st.columns([10, 0.5])
+            c1.text_input(" ", value=s, key=f"sig_{i}", label_visibility="collapsed")
+            with c2:
+                _js_copy(s, f"cp_sig_{i}")
 
     groups = result.get("asset_groups", [])
     if groups:
         _section_header("Asset Group Names — 3 suggestions")
         for i, g in enumerate(groups[:3]):
-            c1, c2 = st.columns([5.5, 0.75])
+            c1, c2 = st.columns([10, 0.5])
             c1.text_input(" ", value=g, key=f"ag_{i}", label_visibility="collapsed")
             with c2:
-                _copy_btn(g, f"cp_ag_{i}")
+                _js_copy(g, f"cp_ag_{i}")
 
 
 def _render_dgen_extras(result: dict) -> None:
     yt = result.get("youtube_desc", "")
     if yt:
         _section_header("YouTube Description  ·  max 200 chars")
-        c1, c2, c3 = st.columns([5, 1.1, 0.75])
+        c1, c2, c3 = st.columns([8, 1.2, 0.5])
         c1.text_area(" ", value=yt, key="yt_desc", height=80, label_visibility="collapsed")
         c2.markdown(_char_badge(yt, 200), unsafe_allow_html=True)
         with c3:
-            _copy_btn(yt, "cp_yt")
+            _js_copy(yt, "cp_yt")
 
     angles = result.get("thumbnail_angles", [])
     if angles:
         _section_header("Thumbnail Angle Suggestions — 3")
         for i, a in enumerate(angles[:3]):
+            c1, c2 = st.columns([10, 0.5])
+            c1.text_input(" ", value=a, key=f"thumb_{i}", label_visibility="collapsed")
+            with c2:
+                _js_copy(a, f"cp_thumb_{i}")
+
+
+# ── History panel ─────────────────────────────────────────────────────────────
+
+def _render_history() -> None:
+    campaigns = _load_campaigns()
+    label = f"📁 Saved Campaigns ({len(campaigns)})" if campaigns else "📁 Saved Campaigns"
+    with st.expander(label, expanded=False):
+        if not campaigns:
+            st.caption("No saved campaigns yet. Generate and save one below.")
+            return
+
+        confirm_key = "_cc_confirm_delete"
+
+        for camp in campaigns:
+            name  = camp.get("campaign_name", "Untitled")
+            ctype = camp.get("campaign_type", "")
+            ts    = camp.get("saved_at", "")[:10]
+
+            col_name, col_load, col_del = st.columns([5, 1, 1])
+            col_name.markdown(
+                f"<div style='padding-top:6px'>"
+                f"<span style='font-size:13px;font-weight:600;color:#e6edf3'>{name}</span>"
+                f"<span style='font-size:11px;color:rgba(255,255,255,0.3);margin-left:10px'>"
+                f"{ctype} · {ts}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+            if col_load.button("Load", key=f"load_{name}", use_container_width=True):
+                st.session_state["cc_result"]        = camp.get("content")
+                st.session_state["cc_campaign_type"] = camp.get("campaign_type", "Search")
+                st.session_state["cc_loaded_name"]   = name
+                # Pre-fill inputs via session state so widgets pick them up
+                st.session_state["cc_ctype"]         = camp.get("campaign_type", "Search")
+                st.session_state["cc_angle"]         = camp.get("angle", ANGLES[0])
+                st.session_state["cc_language"]      = camp.get("language", LANGUAGES[0])
+                st.session_state["cc_url"]           = camp.get("url", "")
+                st.session_state["cc_page_data"]     = camp.get("page_data")
+                st.session_state["cc_campaign_name"] = name
+                st.rerun()
+
+            # Delete with inline confirmation
+            confirming = st.session_state.get(confirm_key) == name
+            if confirming:
+                dc1, dc2, dc3 = st.columns([4, 1, 1])
+                dc1.caption(f"Delete **{name}**? Cannot be undone.")
+                if dc2.button("Yes", key=f"yes_del_{name}", type="primary",
+                              use_container_width=True):
+                    _delete_campaign(name)
+                    st.session_state.pop(confirm_key, None)
+                    st.rerun()
+                if dc3.button("No", key=f"no_del_{name}", use_container_width=True):
+                    st.session_state.pop(confirm_key, None)
+                    st.rerun()
+            else:
+                if col_del.button("Delete", key=f"del_{name}", use_container_width=True):
+                    st.session_state[confirm_key] = name
+                    st.rerun()
+
             st.markdown(
-                f"<div style='background:rgba(188,140,255,0.06);"
-                f"border:1px solid rgba(188,140,255,0.15);border-radius:10px;"
-                f"padding:10px 14px;margin-bottom:6px;font-size:13px;"
-                f"color:rgba(255,255,255,0.7)'><b style='color:rgba(188,140,255,0.8)'>"
-                f"{i+1}.</b> {a}</div>",
+                "<hr style='border:none;border-top:1px solid rgba(255,255,255,0.05);margin:4px 0'>",
                 unsafe_allow_html=True,
             )
 
@@ -442,6 +563,12 @@ def render_campaign_creator() -> None:
     st.session_state.setdefault("cc_page_data", None)
     st.session_state.setdefault("cc_url_fetched", "")
     st.session_state.setdefault("cc_campaign_type", "Search")
+    st.session_state.setdefault("cc_campaign_name", "")
+    st.session_state.setdefault("cc_loaded_name", "")
+
+    # ── History panel ─────────────────────────────────────────────────────────
+    _render_history()
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
     # ── Inputs ────────────────────────────────────────────────────────────────
     c1, c2 = st.columns(2)
@@ -524,8 +651,13 @@ def render_campaign_creator() -> None:
                 product_desc=product_desc,
                 language=language,
             )
-        st.session_state["cc_result"] = result
+        st.session_state["cc_result"]        = result
         st.session_state["cc_campaign_type"] = campaign_type
+        st.session_state["cc_loaded_name"]   = ""
+        # Auto-suggest campaign name on fresh generation
+        st.session_state["cc_campaign_name"] = _suggest_campaign_name(
+            page_data, campaign_type, angle
+        )
 
     # ── Results ───────────────────────────────────────────────────────────────
     result = st.session_state.get("cc_result")
@@ -584,4 +716,45 @@ def render_campaign_creator() -> None:
         key="cc_copy_all",
         label_visibility="collapsed",
     )
-    _copy_btn(all_text, "cp_all_final")
+    _js_copy(all_text, "cp_all_final")
+
+    # ── Campaign name + Save ──────────────────────────────────────────────────
+    st.markdown(
+        "<hr style='border:none;border-top:1px solid rgba(255,255,255,0.07);margin:24px 0 8px'>",
+        unsafe_allow_html=True,
+    )
+    _section_header("Save Campaign")
+
+    name_col, save_col = st.columns([4, 1])
+    campaign_name = name_col.text_input(
+        "Campaign Name",
+        value=st.session_state.get("cc_campaign_name", ""),
+        placeholder="e.g. Product_PMax_Urgency_May2026",
+        key="cc_campaign_name_input",
+        label_visibility="visible",
+    )
+
+    # Keep session state in sync so reloads don't reset it
+    st.session_state["cc_campaign_name"] = campaign_name
+
+    save_clicked = save_col.button(
+        "💾 Save", use_container_width=True, type="primary", key="cc_save"
+    )
+
+    if save_clicked:
+        if not campaign_name.strip():
+            st.error("Please enter a campaign name before saving.")
+        else:
+            entry = {
+                "campaign_name": campaign_name.strip(),
+                "campaign_type": ctype,
+                "angle":         st.session_state.get("cc_angle", ""),
+                "url":           st.session_state.get("cc_url", ""),
+                "language":      st.session_state.get("cc_language", ""),
+                "page_data":     st.session_state.get("cc_page_data"),
+                "content":       result,
+                "saved_at":      datetime.utcnow().isoformat(),
+            }
+            _save_campaign(entry)
+            st.success(f"✅ Campaign **{campaign_name.strip()}** saved.")
+            st.session_state["cc_loaded_name"] = campaign_name.strip()
