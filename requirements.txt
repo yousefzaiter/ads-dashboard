@@ -22,3 +22,4 @@ python-bidi>=0.4.2
 # Campaign Creator
 anthropic>=0.25.0
 beautifulsoup4>=4.12.0
+pyperclip>=1.8.0
