@@ -953,141 +953,186 @@ def ai_decision(row: pd.Series) -> dict:
     conv_value  = float(row.get("Conv. Value", 0))
     ctr         = float(row.get("CTR", 0))
     cpa         = float(row.get("CPA", 0))
+    avg_cpc     = float(row.get("Avg CPC", 0))
     status      = row.get("Status", "")
     camp_type   = str(row.get("Type", "")).upper()
 
-    roas = round(conv_value / spend, 2) if spend > 0 else 0.0
+    roas      = round(conv_value / spend, 2) if spend > 0 else 0.0
+    conv_rate = round(conversions / clicks * 100, 2) if clicks > 0 else 0.0
 
-    # ── Paused ──
+    # ── Paused ──────────────────────────────────────────────────────────────────
     if status != "ENABLED":
         return dict(tier="paused", emoji="⏸", label="موقوفة", color="#3d4354",
                     decision="الحملة موقوفة حالياً",
                     reason="لا توجد بيانات أداء في الفترة المحددة",
                     action="أعد تفعيلها إذا كانت ذات صلة بالموسم أو المنتج الحالي",
-                    roas=0, spend=spend)
+                    outcome="",
+                    roas=0, conv_rate=0, spend=spend)
 
-    # ── Insufficient data ──
+    # ── Insufficient data ───────────────────────────────────────────────────────
     if impressions < 50 and spend < 3:
         return dict(tier="insufficient", emoji="🔵", label="بيانات غير كافية", color="#58a6ff",
                     decision="بيانات غير كافية للتقييم",
-                    reason=f"الظهورات {impressions:,} والإنفاق SAR {spend:.2f} — لا تكفي لحكم دقيق",
+                    reason=f"ظهور {impressions:,} · إنفاق SAR {spend:.2f} — لا تكفي لحكم دقيق",
                     action="شغّل الحملة 3–5 أيام إضافية قبل اتخاذ أي قرار",
-                    roas=roas, spend=spend)
+                    outcome="تقييم دقيق بعد تجميع بيانات كافية",
+                    roas=roas, conv_rate=conv_rate, spend=spend)
 
-    # ── CTR benchmarks by type ──
-    if "SEARCH" in camp_type:
-        ctr_good, ctr_low = 3.0, 1.0
-    elif "SHOPPING" in camp_type:
-        ctr_good, ctr_low = 0.8, 0.25
-    else:
-        ctr_good, ctr_low = 0.6, 0.15
+    # ── CTR benchmarks ──────────────────────────────────────────────────────────
+    is_search   = "SEARCH"   in camp_type
+    is_shopping = "SHOPPING" in camp_type
+    is_pmax     = "PERFORMANCE_MAX" in camp_type
+    is_dgen     = "DEMAND_GEN" in camp_type
 
-    issues, strengths = [], []
+    ctr_target = 3.0 if is_search else 0.8 if is_shopping else 0.5
 
-    # CTR
-    if ctr >= ctr_good:
-        strengths.append(("ctr_strong", ctr))
-    elif ctr >= ctr_low:
-        issues.append(("ctr_low", ctr))
-    else:
-        issues.append(("ctr_very_low", ctr))
+    # ── PAUSE / FIX (immediate action needed) ──────────────────────────────────
+    if conversions == 0 and spend >= 40:
+        return dict(
+            tier="weak", emoji="🔴", label="أوقف — إنفاق بلا نتائج", color="#f85149",
+            decision="أوقف الحملة — إنفاق بدون تحويلات",
+            reason=f"صُرف SAR {spend:.0f} بدون أي تحويل — المشكلة في التتبع أو الاستهداف أو الصفحة",
+            action="أوقف فوراً وتحقق من tracking · راجع الجمهور والإعلانات من الصفر",
+            outcome="وقف نزيف الإنفاق — يمكن إعادة الإطلاق بعد إصلاح التتبع",
+            roas=roas, conv_rate=conv_rate, spend=spend,
+        )
 
-    # Conversions & ROAS
-    if conversions > 0:
-        if roas >= 3:
-            strengths.append(("roas_excellent", roas))
-        elif roas >= 1.5:
-            strengths.append(("roas_good", roas))
-        elif roas >= 0.8:
-            issues.append(("roas_low", roas))
-        else:
-            issues.append(("roas_very_low", roas))
-        if cpa > 0:
-            if cpa <= 120:   strengths.append(("cpa_ok", cpa))
-            elif cpa <= 300: issues.append(("cpa_high", cpa))
-            else:            issues.append(("cpa_very_high", cpa))
-    else:
-        if spend >= 40:   issues.append(("no_conv_high", spend))
-        elif spend >= 10: issues.append(("no_conv_mid",  spend))
-        else:             issues.append(("no_conv_low",  spend))
+    if roas > 0 and roas < 1 and spend >= 20:
+        return dict(
+            tier="weak", emoji="🔴", label="أوقف — الحملة تخسر", color="#f85149",
+            decision="أوقف الحملة — ROAS أقل من 1×",
+            reason=f"ROAS {roas:.2f}× — كل SAR 1 إنفاق تعود بـ SAR {roas:.2f} فقط · إجمالي خسارة مؤكدة",
+            action="أوقف الحملة فوراً أو غيّر الاستراتيجية كلياً قبل الاستمرار",
+            outcome="وقف الخسائر الفورية · إعادة البناء بـ bidding strategy مختلف",
+            roas=roas, conv_rate=conv_rate, spend=spend,
+        )
 
-    # ── Tier ──
-    critical = [i for i in issues    if i[0] in ("roas_very_low", "no_conv_high", "ctr_very_low")]
-    strong_s = [s for s in strengths if s[0] in ("roas_excellent", "ctr_strong")]
+    if cpa > 300 and conversions > 0 and spend >= 30:
+        return dict(
+            tier="weak", emoji="🔴", label="Fix — CPA مرتفع جداً", color="#f85149",
+            decision="CPA مرتفع جداً — راجع الـ Bidding",
+            reason=f"تكلفة التحويل SAR {cpa:.0f} — أعلى من المستوى الصحي بشكل كبير",
+            action="غيّر الـ bidding strategy · ضيّق الاستهداف · راجع جودة العروض",
+            outcome="خفض CPA إلى أقل من SAR 150 سيجعل الحملة مربحة",
+            roas=roas, conv_rate=conv_rate, spend=spend,
+        )
 
-    if strong_s and not issues and conversions > 0:
-        tier = "strong"
-    elif critical:
-        tier = "weak"
-    else:
-        tier = "moderate"
+    # ── SCALE (increase budget) ─────────────────────────────────────────────────
+    if roas >= 3 and conv_rate >= 2 and conversions > 0:
+        budget_inc = round(spend * 0.25, 0)
+        return dict(
+            tier="strong", emoji="🟢", label="Scale — ارفع الميزانية", color="#3fb950",
+            decision="ارفع الميزانية 20-30%",
+            reason=(
+                f"ROAS {roas:.1f}× فوق الهدف 3× · "
+                f"معدل التحويل {conv_rate:.1f}% ممتاز · "
+                f"CPC {avg_cpc:.2f} SAR كفوء"
+            ),
+            action=f"ارفع الميزانية اليومية بـ ~SAR {budget_inc:.0f} (20-30%) واستغل الزخم الحالي",
+            outcome="متوقع زيادة التحويلات 20-25% مع الحفاظ على نفس الكفاءة",
+            roas=roas, conv_rate=conv_rate, spend=spend,
+        )
 
-    # ── Arabic copy ──
-    if tier == "strong":
-        parts = []
-        for k, v in strengths:
-            if k == "ctr_strong":     parts.append(f"CTR ممتاز ({v:.2f}%)")
-            elif k == "roas_excellent": parts.append(f"ROAS قوي ({v:.1f}×)")
-            elif k == "cpa_ok":         parts.append(f"CPA مناسب ({v:.0f} SAR)")
-        decision = "ارفع الميزانية +20% إلى +30%"
-        reason   = "الحملة تحقق نتائج ممتازة — " + "، ".join(parts)
-        action   = "زِد الميزانية اليومية 20–30%، هذا الوقت المناسب للتوسع واستغلال الزخم الحالي"
-        color, emoji, label = "#3fb950", "🟢", "قوي — Scale"
+    # ── OPTIMIZE — sub-cases ────────────────────────────────────────────────────
+    # Good ROAS but low conv rate → landing page
+    if roas >= 1.5 and conv_rate < 1 and clicks >= 50:
+        return dict(
+            tier="moderate", emoji="🟡", label="Optimize — صفحة هبوط", color="#e3b341",
+            decision="Optimize — مشكلة في صفحة الهبوط",
+            reason=(
+                f"ROAS {roas:.1f}× جيد لكن معدل التحويل {conv_rate:.1f}% ضعيف رغم {clicks:,} نقرة · "
+                "المشكلة في الصفحة وليس الإعلان"
+            ),
+            action="حسّن سرعة الصفحة · اجعل الـ CTA أوضح · اختبر A/B على الهيدر",
+            outcome="رفع Conv Rate إلى 2%+ سيزيد ROAS بدون زيادة الميزانية",
+            roas=roas, conv_rate=conv_rate, spend=spend,
+        )
 
-    elif tier == "weak":
-        r_parts, a_parts = [], []
-        for k, v in issues:
-            if k == "no_conv_high":
-                r_parts.append(f"صُرف SAR {v:.0f} بدون أي تحويل واحد")
-                a_parts.append("أوقف الحملة فوراً وراجع الاستهداف والإعلانات من الصفر")
-            elif k == "ctr_very_low":
-                r_parts.append(f"CTR منخفض جداً ({v:.2f}%) — الإعلانات لا تجذب أحداً")
-                a_parts.append("عدّل الصور والعناوين جذرياً أو أوقف الحملة وأعد بناءها")
-            elif k == "roas_very_low":
-                r_parts.append(f"ROAS ضعيف جداً ({v:.1f}×) — الحملة تخسر")
-                a_parts.append("قلّل الإنفاق فوراً وراجع الاستراتيجية بالكامل")
-        decision = "أوقف الحملة أو عدّلها"
-        reason   = " · ".join(r_parts) if r_parts else "الأداء العام ضعيف جداً"
-        action   = a_parts[0] if a_parts else "راجع الحملة بالكامل وعدّل الاستراتيجية"
-        color, emoji, label = "#f85149", "🔴", "ضعيف — Pause"
+    # High CPC + low conv rate → audience/copy
+    if avg_cpc > 5 and conv_rate < 1 and clicks >= 20:
+        return dict(
+            tier="moderate", emoji="🟡", label="Optimize — CPC مرتفع", color="#e3b341",
+            decision="Optimize — تكلفة النقرة مرتفعة مع تحويل ضعيف",
+            reason=(
+                f"CPC {avg_cpc:.2f} SAR مرتفع · "
+                f"معدل التحويل {conv_rate:.1f}% ضعيف · "
+                "مشكلة في الجمهور أو الإعلانات"
+            ),
+            action="راجع الجمهور المستهدف · جرّب creative جديد · أضف negative keywords",
+            outcome="خفض CPC أو رفع Conv Rate سيحسن ROAS بشكل كبير",
+            roas=roas, conv_rate=conv_rate, spend=spend,
+        )
 
-    else:  # moderate
-        r_parts, a_parts = [], []
-        for k, v in issues:
-            if k == "ctr_low":
-                r_parts.append(f"CTR ({v:.2f}%) أقل من المستهدف")
-                a_parts.append("جرّب عناوين وصور جديدة لرفع نسبة النقر")
-            elif k == "roas_low":
-                r_parts.append(f"ROAS ({v:.1f}×) دون المستهدف 3×")
-                a_parts.append("حسّن صفحة الهبوط أو عدّل الاستهداف لرفع الـ ROAS")
-            elif k == "cpa_high":
-                r_parts.append(f"CPA مرتفع ({v:.0f} SAR)")
-                a_parts.append("ضيّق نطاق الاستهداف لتخفيض تكلفة التحويل")
-            elif k == "cpa_very_high":
-                r_parts.append(f"CPA مرتفع جداً ({v:.0f} SAR)")
-                a_parts.append("راجع الجمهور المستهدف وعدّل العروض لتخفيض CPA")
-            elif k in ("no_conv_mid", "no_conv_low"):
-                r_parts.append("لم تتحقق تحويلات بعد في هذه الفترة")
-                a_parts.append("أعطِ الحملة وقتاً أطول وتأكد من صحة تتبع التحويلات")
-        for k, v in strengths:
-            if k == "ctr_strong": r_parts.append(f"CTR جيد ({v:.2f}%)")
-        decision = "بحاجة تحسين"
-        reason   = " · ".join(r_parts) if r_parts else "الأداء متوسط، هناك مجال للتحسين"
-        action   = a_parts[0] if a_parts else "راجع الحملة وجرّب تحسينات تدريجية"
-        color, emoji, label = "#e3b341", "🟡", "يحتاج تحسين — Optimize"
+    # Low CTR → creative/audience
+    if ctr < ctr_target and impressions >= 500 and not is_dgen:
+        return dict(
+            tier="moderate", emoji="🟡", label="Optimize — CTR منخفض", color="#e3b341",
+            decision="Optimize — CTR منخفض، الإعلانات لا تجذب الانتباه",
+            reason=(
+                f"CTR {ctr:.2f}% أقل من الهدف {ctr_target:.1f}% · "
+                f"الإعلان يظهر {impressions:,} مرة لكن لا يُضغط عليه"
+            ),
+            action="جرّب عناوين ومرئيات جديدة · اختبر 3-5 إعلانات مختلفة",
+            outcome="رفع CTR إلى الهدف سيزيد النقرات بنفس الإنفاق",
+            roas=roas, conv_rate=conv_rate, spend=spend,
+        )
 
-    return dict(tier=tier, emoji=emoji, label=label, color=color,
-                decision=decision, reason=reason, action=action,
-                roas=roas, spend=spend)
+    # Good conv rate but low ROAS → pricing/AOV issue
+    if conv_rate >= 2 and 0 < roas < 3:
+        return dict(
+            tier="moderate", emoji="🟡", label="Optimize — قيمة الطلب", color="#e3b341",
+            decision="Optimize — معدل التحويل جيد لكن قيمة الطلب منخفضة",
+            reason=(
+                f"Conv Rate {conv_rate:.1f}% ممتاز · "
+                f"لكن ROAS {roas:.1f}× دون الهدف 3× · "
+                "قيمة الأوردر منخفضة"
+            ),
+            action="أضف upsell/cross-sell · ارفع الحد الأدنى للطلب · جرّب bundle offers",
+            outcome="رفع متوسط قيمة الأوردر 20% سيرفع ROAS فوق الهدف 3×",
+            roas=roas, conv_rate=conv_rate, spend=spend,
+        )
+
+    # No conversions with moderate spend
+    if conversions == 0 and spend >= 10:
+        return dict(
+            tier="moderate", emoji="🟡", label="Optimize — لا تحويلات", color="#e3b341",
+            decision="Optimize — لا تحويلات بعد",
+            reason=f"إنفاق SAR {spend:.0f} بدون تحويلات حتى الآن · قد تحتاج الحملة وقتاً للتعلم",
+            action="تأكد من صحة تتبع التحويلات · أعطِ الحملة 3-5 أيام إضافية",
+            outcome="إذا لم تتحقق تحويلات بعد 7 أيام، راجع الاستهداف جذرياً",
+            roas=roas, conv_rate=conv_rate, spend=spend,
+        )
+
+    # ── GOOD — maintain ─────────────────────────────────────────────────────────
+    tier  = "strong" if roas >= 3 else "moderate"
+    emoji = "🟢" if tier == "strong" else "🟡"
+    label = "الحملة في المسار الصح" if tier == "strong" else "أداء مقبول"
+    color = "#3fb950" if tier == "strong" else "#e3b341"
+
+    reason_parts = [f"ROAS {roas:.1f}×", f"CTR {ctr:.2f}%"]
+    if conv_rate > 0:
+        reason_parts.append(f"Conv Rate {conv_rate:.1f}%")
+    if cpa > 0:
+        reason_parts.append(f"CPA SAR {cpa:.0f}")
+
+    return dict(
+        tier=tier, emoji=emoji, label=label, color=color,
+        decision="الحملة في المسار الصح — حافظ على الإعدادات",
+        reason=" · ".join(reason_parts),
+        action="راقب الأداء يومياً وابحث عن فرص التوسع عند استقرار الـ ROAS",
+        outcome="استمرار الأداء الجيد مع احتمال تحسن تدريجي",
+        roas=roas, conv_rate=conv_rate, spend=spend,
+    )
 
 
 def campaign_card(row: pd.Series, d: dict) -> str:
     """Render a single campaign as an HTML card with AI recommendation."""
-    name   = row["Campaign"]
-    status = row["Status"]
-    color  = d["color"]
-    ctype  = TYPE_LABELS.get(str(row.get("Type","")).upper(), str(row.get("Type","")))
-    roas_v = d["roas"]
+    name      = row["Campaign"]
+    status    = row["Status"]
+    color     = d["color"]
+    ctype     = TYPE_LABELS.get(str(row.get("Type","")).upper(), str(row.get("Type","")))
+    roas_v    = d["roas"]
+    cr_v      = d.get("conv_rate", 0)
 
     is_active  = status == "ENABLED"
     has_data   = row["Impressions"] > 0 or row["Cost"] > 0
@@ -1100,7 +1145,6 @@ def campaign_card(row: pd.Series, d: dict) -> str:
         '<span style="font-size:10px;color:rgba(255,255,255,0.2);font-weight:500">○ موقوفة</span>'
     )
 
-    # Compact row for paused-with-no-data
     if not is_active and not has_data:
         return f"""
         <div style="background:#090c14;border:1px solid rgba(255,255,255,0.04);
@@ -1112,32 +1156,29 @@ def campaign_card(row: pd.Series, d: dict) -> str:
           <span style="font-size:10.5px;color:rgba(255,255,255,0.18)">⏸ موقوفة</span>
         </div>"""
 
-    # Metric chips
-    roas_chip = (
-        f'<div style="text-align:center;padding:0 8px;border-left:1px solid rgba(255,255,255,0.06)">'
-        f'<div style="font-size:9.5px;color:rgba(255,255,255,0.22);letter-spacing:.5px;margin-bottom:2px">ROAS</div>'
-        f'<div style="font-size:13px;font-weight:700;color:{"#3fb950" if roas_v>=3 else "#f85149" if roas_v>0 else "rgba(255,255,255,0.3)"}">'
-        f'{roas_v:.1f}×</div></div>'
-    ) if roas_v > 0 else ""
-
-    def chip(icon, label, val):
+    def chip(label, val, highlight_color=None):
+        vc = highlight_color or "rgba(255,255,255,0.75)"
         return (
             f'<div style="text-align:center;padding:0 10px">'
-            f'<div style="font-size:9.5px;color:rgba(255,255,255,0.22);letter-spacing:.5px;margin-bottom:2px">{label}</div>'
-            f'<div style="font-size:13px;font-weight:600;color:rgba(255,255,255,0.75)">{val}</div>'
+            f'<div style="font-size:9px;color:rgba(255,255,255,0.22);letter-spacing:.5px;'
+            f'text-transform:uppercase;margin-bottom:2px">{label}</div>'
+            f'<div style="font-size:13px;font-weight:700;color:{vc}">{val}</div>'
             f'</div>'
         )
 
+    roas_color = "#3fb950" if roas_v >= 3 else "#f85149" if 0 < roas_v < 1 else "#e3b341" if roas_v > 0 else "rgba(255,255,255,0.3)"
+    cr_color   = "#3fb950" if cr_v >= 2 else "#e3b341" if cr_v >= 0.5 else "#f85149" if cr_v > 0 else "rgba(255,255,255,0.3)"
+
     metrics_html = (
-        chip("👁", "Impr.", fmt_number(row["Impressions"])) +
-        chip("🖱", "Clicks", f"{row['Clicks']:,}") +
-        chip("📊", "CTR", f"{row['CTR']:.2f}%") +
-        chip("💸", "Spend", f"SAR {row['Cost']:,.0f}") +
-        chip("🎯", "Conv.", f"{row['Conversions']:.0f}") +
-        roas_chip
+        chip("Impr.", fmt_number(row["Impressions"])) +
+        chip("Clicks", f"{row['Clicks']:,}") +
+        chip("CTR", f"{row['CTR']:.2f}%") +
+        chip("Spend", f"SAR {row['Cost']:,.0f}") +
+        chip("Conv.", f"{row['Conversions']:.0f}") +
+        chip("Conv. Rate", f"{cr_v:.1f}%", cr_color) +
+        (chip("ROAS", f"{roas_v:.1f}×", roas_color) if roas_v > 0 else "")
     )
 
-    # Tier badge
     tier_badge = (
         f'<div style="display:flex;align-items:center;gap:6px;padding:5px 12px;'
         f'background:{hex_to_rgba(color,0.1)};border:1px solid {border_col};'
@@ -1147,16 +1188,24 @@ def campaign_card(row: pd.Series, d: dict) -> str:
         f'</div>'
     )
 
-    # AI section (RTL Arabic)
+    outcome_html = (
+        f'<div style="margin-top:6px;font-size:11.5px;color:rgba(255,255,255,0.2);'
+        f'line-height:1.5;display:flex;align-items:flex-start;gap:5px;direction:rtl">'
+        f'<span style="color:{color};flex-shrink:0">→</span>'
+        f'<span>{d.get("outcome","")}</span></div>'
+    ) if d.get("outcome") else ""
+
     ai_html = (
         f'<div style="padding:14px 20px 16px;border-top:1px solid rgba(255,255,255,0.04);'
         f'background:{bg_tint};direction:rtl;text-align:right">'
         f'<div style="font-size:14.5px;font-weight:800;color:{color};margin-bottom:6px;'
         f'line-height:1.3">{d["emoji"]} {d["decision"]}</div>'
-        f'<div style="font-size:12.5px;color:rgba(255,255,255,0.48);margin-bottom:6px;'
+        f'<div style="font-size:12.5px;color:rgba(255,255,255,0.48);margin-bottom:8px;'
         f'line-height:1.65">{d["reason"]}</div>'
-        f'<div style="font-size:12px;color:rgba(255,255,255,0.28);line-height:1.5">'
-        f'💡 {d["action"]}</div>'
+        f'<div style="font-size:12px;color:rgba(255,255,255,0.65);line-height:1.5;'
+        f'background:rgba(255,255,255,0.03);border-radius:8px;padding:8px 12px;'
+        f'border-right:2px solid {color}">💡 {d["action"]}</div>'
+        f'{outcome_html}'
         f'</div>'
     )
 
@@ -1423,6 +1472,7 @@ avg_ctr      = (total_clicks / total_impr * 100) if total_impr else 0
 avg_cpc      = (total_spend / total_clicks) if total_clicks else 0
 cpa          = (total_spend / total_conv) if total_conv else 0
 roas         = (total_cv / total_spend) if total_spend else 0
+conv_rate    = (total_conv / total_clicks * 100) if total_clicks else 0
 
 # ── Action Buttons (PDF / Send) ───────────────────────────────────────────────
 _pdf_key = (selected_client, start_str, end_str, vis)
@@ -1527,15 +1577,20 @@ if st.session_state.get("_show_send_panel"):
 # ── KPI Cards ─────────────────────────────────────────────────────────────────
 st.markdown('<div class="sec-label">Key Metrics</div>', unsafe_allow_html=True)
 
-cols = st.columns(7)
+_cr_sub  = f"avg {conv_rate:.1f}% conv rate" if conv_rate > 0 else "no conversions"
+_roas_sub = "Excellent ✓" if roas >= 3 else "Good" if roas >= 1.5 else "Below target ⚠"
+
+cols = st.columns(9)
 metrics = [
-    ("💸", "Total Spend",   fmt_currency(total_spend),           f"{len(df_active[df_active['Cost']>0])} active campaigns", "#58a6ff"),
-    ("👁",  "Impressions",   fmt_number(total_impr),              "Total ad views",                                          "#d2a8ff"),
-    ("🖱",  "Clicks",        fmt_number(total_clicks),            "Total link clicks",                                       "#3fb950"),
-    ("📊", "CTR",           f"{avg_ctr:.2f}%",                   "Click-through rate",                                      "#39c5d0"),
-    ("⚡", "Avg. CPC",      fmt_currency(avg_cpc),               "Cost per click",                                          "#ffa657"),
-    ("🎯", "Conversions",   f"{total_conv:,.1f}",                "Total conversions",                                       "#ff6b9d"),
-    ("💰", "CPA",           fmt_currency(cpa) if total_conv else "—", "Cost per conversion",                               "#e3b341"),
+    ("💸", "Total Spend",    fmt_currency(total_spend),                f"{len(df_active[df_active['Cost']>0])} active campaigns", "#58a6ff"),
+    ("👁",  "Impressions",    fmt_number(total_impr),                   "Total ad views",                                          "#d2a8ff"),
+    ("🖱",  "Clicks",         fmt_number(total_clicks),                 "Total link clicks",                                       "#3fb950"),
+    ("📊", "CTR",            f"{avg_ctr:.2f}%",                        "Click-through rate",                                      "#39c5d0"),
+    ("⚡", "Avg. CPC",       fmt_currency(avg_cpc),                    "Cost per click",                                          "#ffa657"),
+    ("🎯", "Conversions",    f"{total_conv:,.1f}",                     "Total conversions",                                       "#ff6b9d"),
+    ("💰", "CPA",            fmt_currency(cpa) if total_conv else "—", "Cost per conversion",                                    "#e3b341"),
+    ("🔄", "Conv. Rate",     f"{conv_rate:.1f}%" if total_conv else "—", _cr_sub,                                               "#a5d6ff"),
+    ("📈", "ROAS",           f"{roas:.2f}×",                           _roas_sub,                                                 "#3fb950" if roas >= 3 else "#f85149"),
 ]
 for col, (icon, label, value, sub, accent) in zip(cols, metrics):
     col.markdown(kpi_card(icon, label, value, sub, accent), unsafe_allow_html=True)
@@ -1573,6 +1628,75 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+
+# ── Campaign Intelligence ──────────────────────────────────────────────────────
+st.markdown('<div class="sec-label">توصيات الذكاء الاصطناعي — Campaign Intelligence</div>',
+            unsafe_allow_html=True)
+
+if not df_active.empty:
+    all_decisions = {i: ai_decision(row) for i, row in df_active.iterrows()}
+
+    n_strong      = sum(1 for d in all_decisions.values() if d["tier"] == "strong")
+    n_moderate    = sum(1 for d in all_decisions.values() if d["tier"] == "moderate")
+    n_weak        = sum(1 for d in all_decisions.values() if d["tier"] == "weak")
+    n_paused      = sum(1 for d in all_decisions.values() if d["tier"] == "paused")
+
+    st.markdown(f"""
+    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;
+                padding:14px 20px;background:#0a0d14;border:1px solid rgba(255,255,255,0.05);
+                border-radius:12px;margin-bottom:18px;font-size:12px">
+      <span style="color:rgba(255,255,255,0.3)">{len(df_active)} حملة</span>
+      <span style="color:rgba(255,255,255,0.1)">|</span>
+      <span style="color:#3fb950;font-weight:600">🟢 {n_strong} Scale</span>
+      <span style="color:#e3b341;font-weight:600">🟡 {n_moderate} Optimize</span>
+      <span style="color:#f85149;font-weight:600">🔴 {n_weak} Pause/Fix</span>
+      <span style="color:rgba(255,255,255,0.2)">⏸ {n_paused} موقوفة</span>
+      <span style="margin-left:auto;font-size:11px;color:rgba(255,255,255,0.15)">
+        {start_str} → {end_str}
+      </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    fc1, fc2, fc3 = st.columns([2, 2, 1])
+    sort_by = fc1.selectbox(
+        "Sort", ["Cost", "Clicks", "CTR", "Impressions", "Conversions"],
+        label_visibility="collapsed")
+    tier_filter = fc2.selectbox(
+        "Filter", ["الكل", "🟢 Scale", "🟡 Optimize", "🔴 Pause/Fix"],
+        label_visibility="collapsed")
+    sort_asc = fc3.selectbox(
+        "Dir", ["↓ Desc", "↑ Asc"],
+        label_visibility="collapsed") == "↑ Asc"
+
+    tier_map   = {"🟢 Scale": "strong", "🟡 Optimize": "moderate", "🔴 Pause/Fix": "weak"}
+    df_sorted  = df_active.sort_values(sort_by, ascending=sort_asc)
+    active_rows = df_sorted[df_sorted["Status"] == "ENABLED"]
+    paused_rows = df_sorted[df_sorted["Status"] != "ENABLED"]
+
+    cards_html = ""
+    shown = 0
+    for i, row in active_rows.iterrows():
+        d = all_decisions[i]
+        if tier_filter != "الكل" and d["tier"] != tier_map.get(tier_filter, ""):
+            continue
+        cards_html += campaign_card(row, d)
+        shown += 1
+
+    if show_paused:
+        for i, row in paused_rows.iterrows():
+            cards_html += campaign_card(row, all_decisions[i])
+
+    if not cards_html:
+        st.info("لا توجد حملات تطابق هذا الفلتر.")
+    else:
+        st.markdown(cards_html, unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="font-size:11px;color:rgba(255,255,255,0.15);margin-top:4px">'
+            f'يعرض {shown} حملة نشطة'
+            f'{"  ·  " + str(len(paused_rows)) + " موقوفة" if show_paused else ""}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
 # ── Daily Trend Chart ─────────────────────────────────────────────────────────
 st.markdown('<div class="sec-label">Daily Performance</div>', unsafe_allow_html=True)
@@ -1889,79 +2013,3 @@ if not df_active.empty and df_active["Cost"].sum() > 0:
             st.plotly_chart(fig3, use_container_width=True)
 
 
-# ── Campaign Intelligence ──────────────────────────────────────────────────────
-st.markdown('<div class="sec-label">توصيات الذكاء الاصطناعي — Campaign Intelligence</div>',
-            unsafe_allow_html=True)
-
-if not df_active.empty:
-    # Generate all decisions first (needed for summary counts)
-    all_decisions = {i: ai_decision(row) for i, row in df_active.iterrows()}
-
-    # Summary counts
-    n_strong   = sum(1 for d in all_decisions.values() if d["tier"] == "strong")
-    n_moderate = sum(1 for d in all_decisions.values() if d["tier"] == "moderate")
-    n_weak     = sum(1 for d in all_decisions.values() if d["tier"] == "weak")
-    n_active   = sum(1 for d in all_decisions.values() if d["tier"] not in ("paused",))
-    n_paused   = sum(1 for d in all_decisions.values() if d["tier"] == "paused")
-
-    st.markdown(f"""
-    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;
-                padding:14px 20px;background:#0a0d14;border:1px solid rgba(255,255,255,0.05);
-                border-radius:12px;margin-bottom:18px;font-size:12px">
-      <span style="color:rgba(255,255,255,0.3)">{len(df_active)} حملة</span>
-      <span style="color:rgba(255,255,255,0.1)">|</span>
-      <span style="color:#3fb950;font-weight:600">🟢 {n_strong} قوي</span>
-      <span style="color:#e3b341;font-weight:600">🟡 {n_moderate} يحتاج تحسين</span>
-      <span style="color:#f85149;font-weight:600">🔴 {n_weak} ضعيف</span>
-      <span style="color:rgba(255,255,255,0.2)">⏸ {n_paused} موقوفة</span>
-      <span style="margin-left:auto;font-size:11px;color:rgba(255,255,255,0.15)">
-        {start_str} → {end_str}
-      </span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Controls
-    fc1, fc2, fc3 = st.columns([2, 2, 1])
-    sort_by = fc1.selectbox(
-        "Sort", ["Cost", "Clicks", "CTR", "Impressions", "Conversions"],
-        label_visibility="collapsed")
-    tier_filter = fc2.selectbox(
-        "Filter", ["الكل", "🟢 قوي", "🟡 يحتاج تحسين", "🔴 ضعيف"],
-        label_visibility="collapsed")
-    sort_asc = fc3.selectbox(
-        "Dir", ["↓ Desc", "↑ Asc"],
-        label_visibility="collapsed") == "↑ Asc"
-
-    tier_map = {"🟢 قوي": "strong", "🟡 يحتاج تحسين": "moderate", "🔴 ضعيف": "weak"}
-    df_sorted = df_active.sort_values(sort_by, ascending=sort_asc)
-
-    # Render active campaigns (full cards)
-    active_rows = df_sorted[df_sorted["Status"] == "ENABLED"]
-    paused_rows = df_sorted[df_sorted["Status"] != "ENABLED"]
-
-    cards_html = ""
-    shown = 0
-    for i, row in active_rows.iterrows():
-        d = all_decisions[i]
-        if tier_filter != "الكل" and d["tier"] != tier_map.get(tier_filter, ""):
-            continue
-        cards_html += campaign_card(row, d)
-        shown += 1
-
-    # Paused campaigns (compact, only if show_paused toggled on)
-    if show_paused:
-        for i, row in paused_rows.iterrows():
-            d = all_decisions[i]
-            cards_html += campaign_card(row, d)
-
-    if not cards_html:
-        st.info("لا توجد حملات تطابق هذا الفلتر.")
-    else:
-        st.markdown(cards_html, unsafe_allow_html=True)
-        st.markdown(
-            f'<div style="font-size:11px;color:rgba(255,255,255,0.15);margin-top:4px">'
-            f'يعرض {shown} حملة نشطة'
-            f'{"  ·  " + str(len(paused_rows)) + " موقوفة" if show_paused else ""}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
