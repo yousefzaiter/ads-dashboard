@@ -49,9 +49,13 @@ def _edit_dialog(client: dict) -> None:
     )
 
     new_name = st.text_input("Display Name", value=client.get("display_name", ""))
-    new_cid  = st.text_input("Google Ads Account ID",
-                              value=client.get("client_id", ""),
-                              help="10-digit ID, no dashes")
+    c_g, c_m = st.columns(2)
+    new_cid  = c_g.text_input("Google Ads Account ID",
+                               value=client.get("client_id", ""),
+                               help="10-digit ID, no dashes")
+    new_meta = c_m.text_input("Meta Ad Account ID",
+                               value=client.get("meta_account_id", ""),
+                               help="Numeric ID only, e.g. 579554746963968")
     new_pass = st.text_input("New Password", type="password",
                               placeholder="Leave blank to keep current password")
     active   = st.toggle("Account Active", value=client.get("active", True))
@@ -66,9 +70,10 @@ def _edit_dialog(client: dict) -> None:
         clients = load_clients()
         for i, c in enumerate(clients):
             if c["username"] == client["username"]:
-                clients[i]["display_name"] = new_name.strip()
-                clients[i]["client_id"]    = new_cid.strip().replace("-", "")
-                clients[i]["active"]       = active
+                clients[i]["display_name"]   = new_name.strip()
+                clients[i]["client_id"]      = new_cid.strip().replace("-", "")
+                clients[i]["meta_account_id"]= new_meta.strip().replace("act_", "")
+                clients[i]["active"]         = active
                 if new_pass.strip():
                     clients[i]["password_hash"] = _hash(new_pass.strip())
                 clients[i]["updated_at"] = datetime.utcnow().isoformat()
@@ -95,6 +100,10 @@ def _tab_add() -> None:
         password  = c3.text_input("Password *", type="password")
         client_id = c4.text_input("Google Ads Account ID *",
                                    placeholder="1234567890  (no dashes)")
+        meta_account_id = st.text_input(
+            "Meta Ad Account ID",
+            placeholder="579554746963968  (optional, numeric only)",
+            help="Leave blank if client has no Meta Ads account")
 
         st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
         submitted = st.form_submit_button(
@@ -119,17 +128,18 @@ def _tab_add() -> None:
             else:
                 clients = load_clients()
                 clients.append({
-                    "username":      username.strip(),
-                    "password_hash": _hash(password.strip()),
-                    "display_name":  display_name.strip(),
-                    "client_id":     client_id.strip().replace("-", ""),
-                    "active":        True,
-                    "created_at":    datetime.utcnow().isoformat(),
+                    "username":        username.strip(),
+                    "password_hash":   _hash(password.strip()),
+                    "display_name":    display_name.strip(),
+                    "client_id":       client_id.strip().replace("-", ""),
+                    "meta_account_id": meta_account_id.strip().replace("act_", ""),
+                    "active":          True,
+                    "created_at":      datetime.utcnow().isoformat(),
                 })
                 save_clients(clients)
                 st.success(
                     f"✓ Client **{display_name.strip()}** added. "
-                    f"They can now log in as `{username.strip()}`.")
+                    f"They can now log in as `{username.strip()}`.`")
 
 
 # ── Tab: Client List ──────────────────────────────────────────────────────────

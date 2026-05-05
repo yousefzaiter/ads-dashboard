@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import smtplib
 import urllib.parse
@@ -252,6 +253,20 @@ div[data-baseweb="select"] > div { background: #0f1520 !important; border-color:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+_CLIENTS_FILE = os.path.join(os.path.dirname(__file__), "clients.json")
+
+def _meta_id_for_google(google_cid: str) -> str:
+    """Return meta_account_id from clients.json for the given Google Ads customer ID."""
+    try:
+        with open(_CLIENTS_FILE, encoding="utf-8") as _f:
+            for _c in json.load(_f).get("clients", []):
+                if _c.get("client_id", "").replace("-", "") == google_cid.replace("-", ""):
+                    return _c.get("meta_account_id", "")
+    except Exception:
+        pass
+    return ""
+
+
 def hex_to_rgba(h: str, a: float) -> str:
     h = h.lstrip("#")
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
@@ -1486,6 +1501,246 @@ with col_h2:
             st.rerun()
 
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+# ── Cross-Platform Overview (admin only, when client has both accounts) ───────
+_cross_meta_raw = _meta_id_for_google(selected_customer_id) if selected_customer_id else ""
+_cross_meta_id  = (f"act_{_cross_meta_raw}" if _cross_meta_raw and not _cross_meta_raw.startswith("act_")
+                   else _cross_meta_raw)
+
+if _is_admin and _cross_meta_id and _meta_token:
+    with st.spinner("Loading cross-platform data…"):
+        _cp_gdf  = fetch_campaign_data(selected_customer_id, token, dev_token, start_str, end_str, mcc_id)
+        _cp_gday = fetch_daily_data(selected_customer_id, token, dev_token, start_str, end_str, mcc_id)
+        _cp_mdf  = fetch_meta_campaigns(_meta_token, _cross_meta_id, start_str, end_str)
+        _cp_mday = fetch_meta_daily(_meta_token, _cross_meta_id, start_str, end_str)
+
+    # ── Google aggregates ─────────────────────────────────────────────────────
+    _g_spend = _cp_gdf["Cost"].sum()        if not _cp_gdf.empty else 0.0
+    _g_clicks= int(_cp_gdf["Clicks"].sum()) if not _cp_gdf.empty else 0
+    _g_imps  = int(_cp_gdf["Impressions"].sum()) if not _cp_gdf.empty else 0
+    _g_conv  = _cp_gdf["Conversions"].sum() if not _cp_gdf.empty else 0.0
+    _g_rev   = _cp_gdf["Conv. Value"].sum() if not _cp_gdf.empty else 0.0
+    _g_roas  = round(_g_rev  / _g_spend,  2) if _g_spend  else 0.0
+    _g_cpa   = round(_g_spend/ _g_conv,   2) if _g_conv   else 0.0
+    _g_ctr   = round(_g_clicks/_g_imps*100,2) if _g_imps  else 0.0
+    _g_cpc   = round(_g_spend/ _g_clicks, 2) if _g_clicks else 0.0
+    _g_cr    = round(_g_conv / _g_clicks*100,2) if _g_clicks else 0.0
+
+    # ── Meta aggregates ───────────────────────────────────────────────────────
+    _m_spend = _cp_mdf["Cost"].sum()        if not _cp_mdf.empty else 0.0
+    _m_clicks= int(_cp_mdf["Clicks"].sum()) if not _cp_mdf.empty else 0
+    _m_imps  = int(_cp_mdf["Impressions"].sum()) if not _cp_mdf.empty else 0
+    _m_conv  = _cp_mdf["Conversions"].sum() if not _cp_mdf.empty else 0.0
+    _m_rev   = _cp_mdf["Conv. Value"].sum() if not _cp_mdf.empty else 0.0
+    _m_roas  = round(_m_rev  / _m_spend,  2) if _m_spend  else 0.0
+    _m_cpa   = round(_m_spend/ _m_conv,   2) if _m_conv   else 0.0
+    _m_ctr   = round(_m_clicks/_m_imps*100,2) if _m_imps  else 0.0
+    _m_cpc   = round(_m_spend/ _m_clicks, 2) if _m_clicks else 0.0
+    _m_cr    = round(_m_conv / _m_clicks*100,2) if _m_clicks else 0.0
+
+    # ── Combined totals ───────────────────────────────────────────────────────
+    _t_spend = _g_spend + _m_spend
+    _t_conv  = _g_conv  + _m_conv
+    _t_rev   = _g_rev   + _m_rev
+    _t_roas  = round(_t_rev / _t_spend, 2) if _t_spend else 0.0
+    _t_cpa   = round(_t_spend / _t_conv, 2) if _t_conv  else 0.0
+
+    # ── Spend split ───────────────────────────────────────────────────────────
+    _g_pct = round(_g_spend / _t_spend * 100) if _t_spend else 50
+    _m_pct = 100 - _g_pct
+
+    # ── Best platform ─────────────────────────────────────────────────────────
+    _best_is_google = _g_roas >= _m_roas
+    _best_lbl  = "Google" if _best_is_google else "Meta"
+    _best_icon = "🔵" if _best_is_google else "📘"
+    _best_roas = _g_roas if _best_is_google else _m_roas
+    _other_roas= _m_roas if _best_is_google else _g_roas
+    _roas_diff = round((_best_roas - _other_roas) / _other_roas * 100) if _other_roas else 0
+
+    def _roas_color(v: float) -> str:
+        return "#3fb950" if v >= 3 else "#58a6ff" if v >= 1.5 else "#f0883e" if v >= 1 else "#f85149"
+
+    def _trow(label: str, gval: str, mval: str, tval: str, highlight: bool = False) -> str:
+        bg = "rgba(255,255,255,0.03)" if highlight else "transparent"
+        return (
+            f"<tr style='background:{bg}'>"
+            f"<td style='padding:10px 14px;color:rgba(255,255,255,0.5);font-size:12px;font-weight:600'>{label}</td>"
+            f"<td style='padding:10px 14px;color:#58a6ff;font-size:13px;font-weight:700;text-align:right'>{gval}</td>"
+            f"<td style='padding:10px 14px;color:#4267B2;font-size:13px;font-weight:700;text-align:right'>{mval}</td>"
+            f"<td style='padding:10px 14px;color:#f0f6fc;font-size:13px;font-weight:800;text-align:right'>{tval}</td>"
+            f"</tr>"
+        )
+
+    _cp_table = f"""
+    <table style="width:100%;border-collapse:collapse;margin:16px 0">
+      <thead>
+        <tr style="border-bottom:1px solid rgba(255,255,255,0.08)">
+          <th style="padding:8px 14px;font-size:10px;font-weight:700;letter-spacing:1.2px;
+                     text-transform:uppercase;color:rgba(255,255,255,0.25);text-align:left">المؤشر</th>
+          <th style="padding:8px 14px;font-size:10px;font-weight:700;letter-spacing:1.2px;
+                     text-transform:uppercase;color:#58a6ff;text-align:right">🔵 Google</th>
+          <th style="padding:8px 14px;font-size:10px;font-weight:700;letter-spacing:1.2px;
+                     text-transform:uppercase;color:#4267B2;text-align:right">📘 Meta</th>
+          <th style="padding:8px 14px;font-size:10px;font-weight:700;letter-spacing:1.2px;
+                     text-transform:uppercase;color:rgba(255,255,255,0.5);text-align:right">📊 المجموع</th>
+        </tr>
+      </thead>
+      <tbody>
+        {_trow("الصرف",       fmt_currency(_g_spend), fmt_currency(_m_spend), fmt_currency(_t_spend), True)}
+        {_trow("المبيعات",    fmt_currency(_g_rev),   fmt_currency(_m_rev),   fmt_currency(_t_rev))}
+        {_trow("ROAS",         f"{_g_roas:.2f}×",      f"{_m_roas:.2f}×",      f"{_t_roas:.2f}× (مرجّح)", True)}
+        {_trow("التحويلات",   f"{_g_conv:,.1f}",       f"{_m_conv:,.1f}",      f"{_t_conv:,.1f}")}
+        {_trow("CPA",          fmt_currency(_g_cpa) if _g_conv else "—",
+                               fmt_currency(_m_cpa) if _m_conv else "—",
+                               fmt_currency(_t_cpa) if _t_conv else "—", True)}
+        {_trow("CTR",          f"{_g_ctr:.2f}%", f"{_m_ctr:.2f}%", "—")}
+        {_trow("CPC",          fmt_currency(_g_cpc) if _g_clicks else "—",
+                               fmt_currency(_m_cpc) if _m_clicks else "—", "—", True)}
+        {_trow("Conv Rate",    f"{_g_cr:.2f}%", f"{_m_cr:.2f}%", "—")}
+      </tbody>
+    </table>
+    """
+
+    _g_roas_dot = "🟢" if _g_roas >= 3 else "🟡" if _g_roas >= 1.5 else "🔴"
+    _m_roas_dot = "🟢" if _m_roas >= 3 else "🟡" if _m_roas >= 1.5 else "🔴"
+
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#0d1117,#0e1521);
+                border:1px solid rgba(255,255,255,0.08);border-radius:16px;
+                padding:22px 26px 20px;margin-bottom:22px">
+
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px">
+        <div>
+          <div style="font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
+                      color:rgba(255,255,255,0.28);margin-bottom:4px">Cross-Platform Overview</div>
+          <div style="font-size:19px;font-weight:800;color:#f0f6fc">
+            📊 {mask_name(selected_client, vis)} — تحليل مقارن
+          </div>
+        </div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.22);padding-top:6px">{start_str} → {end_str}</div>
+      </div>
+
+      {_cp_table}
+
+      <div style="margin:18px 0 14px">
+        <div style="font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;
+                    color:rgba(255,255,255,0.25);margin-bottom:10px">توزيع الإنفاق</div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <div style="width:72px;font-size:11px;color:#58a6ff;font-weight:600">🔵 Google</div>
+          <div style="flex:1;background:rgba(255,255,255,0.06);border-radius:4px;height:10px;overflow:hidden">
+            <div style="width:{_g_pct}%;height:100%;background:linear-gradient(90deg,#58a6ff,#1f6feb);border-radius:4px"></div>
+          </div>
+          <div style="width:52px;font-size:12px;color:rgba(255,255,255,0.6);font-weight:700;text-align:right">{_g_pct}%</div>
+          <div style="width:80px;font-size:11px;color:rgba(255,255,255,0.4);text-align:right">{fmt_currency(_g_spend)}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:72px;font-size:11px;color:#4267B2;font-weight:600">📘 Meta</div>
+          <div style="flex:1;background:rgba(255,255,255,0.06);border-radius:4px;height:10px;overflow:hidden">
+            <div style="width:{_m_pct}%;height:100%;background:linear-gradient(90deg,#4267B2,#1a3a6b);border-radius:4px"></div>
+          </div>
+          <div style="width:52px;font-size:12px;color:rgba(255,255,255,0.6);font-weight:700;text-align:right">{_m_pct}%</div>
+          <div style="width:80px;font-size:11px;color:rgba(255,255,255,0.4);text-align:right">{fmt_currency(_m_spend)}</div>
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:24px;margin:18px 0 14px;flex-wrap:wrap">
+        <div style="font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;
+                    color:rgba(255,255,255,0.25)">مقارنة ROAS</div>
+        <div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.04);
+                    border-radius:8px;padding:8px 14px">
+          <span style="font-size:12px;color:#58a6ff;font-weight:600">🔵 Google</span>
+          <span style="font-size:16px;font-weight:800;color:{_roas_color(_g_roas)}">{_g_roas:.2f}×</span>
+          <span>{_g_roas_dot}</span>
+        </div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.2)">vs</div>
+        <div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.04);
+                    border-radius:8px;padding:8px 14px">
+          <span style="font-size:12px;color:#4267B2;font-weight:600">📘 Meta</span>
+          <span style="font-size:16px;font-weight:800;color:{_roas_color(_m_roas)}">{_m_roas:.2f}×</span>
+          <span>{_m_roas_dot}</span>
+        </div>
+      </div>
+
+      <div style="background:linear-gradient(90deg,rgba(63,185,80,0.12),rgba(63,185,80,0.04));
+                  border:1px solid rgba(63,185,80,0.25);border-radius:10px;
+                  padding:12px 16px;font-size:13px;font-weight:700;color:#3fb950">
+        🏆 أفضل أداء: {_best_icon} {_best_lbl}
+        {"— ROAS أعلى بـ " + str(_roas_diff) + "%" if _roas_diff else "— أداء متساوٍ"}
+      </div>
+
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Daily Breakdown (collapsible) ─────────────────────────────────────────
+    _show_daily = st.checkbox("📅 عرض التفاصيل اليومية", key="cp_daily_toggle")
+    if _show_daily and (not _cp_gday.empty or not _cp_mday.empty):
+        if not _cp_gday.empty:
+            _cp_gday = _cp_gday.copy()
+            _cp_gday["Date"] = pd.to_datetime(_cp_gday["Date"])
+            _cp_gday["G_ROAS"] = _cp_gday.apply(
+                lambda r: round(r["Conv. Value"] / r["Cost"], 2) if r["Cost"] > 0 else 0.0, axis=1)
+        if not _cp_mday.empty:
+            _cp_mday = _cp_mday.copy()
+            _cp_mday["Date"] = pd.to_datetime(_cp_mday["Date"])
+            _cp_mday["M_ROAS"] = _cp_mday.apply(
+                lambda r: round(r["Conv. Value"] / r["Cost"], 2) if r["Cost"] > 0 else 0.0, axis=1)
+
+        _all_dates = sorted(set(
+            list(_cp_gday["Date"].dt.date if not _cp_gday.empty else []) +
+            list(_cp_mday["Date"].dt.date if not _cp_mday.empty else [])
+        ))
+
+        _daily_rows = ""
+        for _dt in _all_dates:
+            _gday_row = _cp_gday[_cp_gday["Date"].dt.date == _dt] if not _cp_gday.empty else pd.DataFrame()
+            _mday_row = _cp_mday[_cp_mday["Date"].dt.date == _dt] if not _cp_mday.empty else pd.DataFrame()
+            _gs = _gday_row["Cost"].sum()    if not _gday_row.empty else 0.0
+            _gr = _gday_row["G_ROAS"].mean() if not _gday_row.empty else 0.0
+            _ms = _mday_row["Cost"].sum()    if not _mday_row.empty else 0.0
+            _mr = _mday_row["M_ROAS"].mean() if not _mday_row.empty else 0.0
+            _ts = _gs + _ms
+            _tr = round(
+                (_gday_row["Conv. Value"].sum() + _mday_row["Conv. Value"].sum()) / _ts, 2
+            ) if _ts else 0.0
+            _row_color = "rgba(63,185,80,0.06)" if _tr >= 3 else \
+                         "rgba(248,81,73,0.06)"  if _tr > 0 and _tr < 1 else "transparent"
+            _gr_c = _roas_color(_gr)
+            _mr_c = _roas_color(_mr)
+            _tr_c = _roas_color(_tr)
+            _daily_rows += (
+                f"<tr style='background:{_row_color};border-bottom:1px solid rgba(255,255,255,0.04)'>"
+                f"<td style='padding:7px 12px;font-size:11px;color:rgba(255,255,255,0.4)'>{_dt.strftime('%b %d')}</td>"
+                f"<td style='padding:7px 12px;font-size:11px;color:#58a6ff;text-align:right'>{fmt_currency(_gs)}</td>"
+                f"<td style='padding:7px 12px;font-size:11px;font-weight:700;color:{_gr_c};text-align:right'>{_gr:.2f}×</td>"
+                f"<td style='padding:7px 12px;font-size:11px;color:#4267B2;text-align:right'>{fmt_currency(_ms)}</td>"
+                f"<td style='padding:7px 12px;font-size:11px;font-weight:700;color:{_mr_c};text-align:right'>{_mr:.2f}×</td>"
+                f"<td style='padding:7px 12px;font-size:11px;color:rgba(255,255,255,0.6);text-align:right'>{fmt_currency(_ts)}</td>"
+                f"<td style='padding:7px 12px;font-size:11px;font-weight:800;color:{_tr_c};text-align:right'>{_tr:.2f}×</td>"
+                f"</tr>"
+            )
+
+        st.markdown(f"""
+        <div style="background:#0a0d14;border:1px solid rgba(255,255,255,0.06);
+                    border-radius:12px;overflow:hidden;margin-bottom:20px">
+          <table style="width:100%;border-collapse:collapse">
+            <thead>
+              <tr style="background:rgba(255,255,255,0.04)">
+                <th style="padding:8px 12px;font-size:10px;font-weight:700;letter-spacing:1px;
+                           text-transform:uppercase;color:rgba(255,255,255,0.25);text-align:left">التاريخ</th>
+                <th style="padding:8px 12px;font-size:10px;color:#58a6ff;text-align:right">Google Spend</th>
+                <th style="padding:8px 12px;font-size:10px;color:#58a6ff;text-align:right">Google ROAS</th>
+                <th style="padding:8px 12px;font-size:10px;color:#4267B2;text-align:right">Meta Spend</th>
+                <th style="padding:8px 12px;font-size:10px;color:#4267B2;text-align:right">Meta ROAS</th>
+                <th style="padding:8px 12px;font-size:10px;color:rgba(255,255,255,0.4);text-align:right">Total Spend</th>
+                <th style="padding:8px 12px;font-size:10px;color:rgba(255,255,255,0.4);text-align:right">Total ROAS</th>
+              </tr>
+            </thead>
+            <tbody>{_daily_rows}</tbody>
+          </table>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
 # ── Platform selector ────────────────────────────────────────────────────────
 _platform = st.radio(
