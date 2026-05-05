@@ -5,6 +5,8 @@ import urllib.parse
 import requests
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
+load_dotenv(override=True)
 from auth import check_auth, do_logout, show_login_page
 from users import get_user
 import plotly.express as px
