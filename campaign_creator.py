@@ -144,58 +144,78 @@ def _section_header(title: str) -> None:
 
 # ── Landing page fetcher ───────────────────────────────────────────────────────
 
+_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ar,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
+def _parse_page(html: str) -> dict:
+    soup = BeautifulSoup(html, "html.parser")
+
+    title_tag = soup.find("title")
+    title = title_tag.get_text(strip=True) if title_tag else ""
+
+    meta = soup.find("meta", {"name": "description"}) or soup.find(
+        "meta", {"property": "og:description"}
+    )
+    meta_desc = meta.get("content", "").strip() if meta else ""
+
+    h1s = [h.get_text(strip=True) for h in soup.find_all("h1")][:3]
+    h2s = [h.get_text(strip=True) for h in soup.find_all("h2")][:5]
+
+    for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+        tag.decompose()
+    body_text = " ".join(soup.get_text(separator=" ").split()[:500])
+
+    return {
+        "success": True,
+        "title": title,
+        "meta_description": meta_desc,
+        "headings": [h for h in h1s + h2s if h],
+        "body_text": body_text,
+    }
+
+
 def fetch_landing_page(url: str) -> dict:
-    try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Cache-Control": "max-age=0",
-        }
-        session = requests.Session()
-        resp = session.get(url, headers=headers, timeout=15, allow_redirects=True)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+    last_error = "Unknown error"
+    for attempt in range(3):
+        try:
+            resp = requests.get(
+                url,
+                headers=_FETCH_HEADERS,
+                timeout=10,
+                allow_redirects=True,
+            )
+            if resp.status_code == 403:
+                return {"success": False, "error": "403", "status_code": 403}
+            resp.raise_for_status()
+            return _parse_page(resp.text)
+        except requests.exceptions.Timeout:
+            last_error = "timeout"
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code
+            if code == 403:
+                return {"success": False, "error": "403", "status_code": 403}
+            last_error = f"HTTP {code}: {e.response.reason}"
+            break  # non-403 HTTP errors won't improve on retry
+        except requests.exceptions.ConnectionError as e:
+            last_error = f"Connection error: {e}"
+        except Exception as e:
+            last_error = str(e)
+            break
 
-        title_tag = soup.find("title")
-        title = title_tag.get_text(strip=True) if title_tag else ""
-
-        meta = soup.find("meta", {"name": "description"}) or soup.find(
-            "meta", {"property": "og:description"}
-        )
-        meta_desc = meta.get("content", "").strip() if meta else ""
-
-        h1s = [h.get_text(strip=True) for h in soup.find_all("h1")][:3]
-        h2s = [h.get_text(strip=True) for h in soup.find_all("h2")][:5]
-
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
-            tag.decompose()
-        words = soup.get_text(separator=" ").split()
-        body_text = " ".join(words[:500])
-
-        return {
-            "success": True,
-            "title": title,
-            "meta_description": meta_desc,
-            "headings": [h for h in h1s + h2s if h],
-            "body_text": body_text,
-        }
-    except requests.exceptions.Timeout:
-        return {"success": False, "error": "Request timed out (12s). Try a different URL."}
-    except requests.exceptions.HTTPError as e:
-        return {"success": False, "error": f"HTTP {e.response.status_code}: {e.response.reason}"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    if last_error == "timeout":
+        return {"success": False, "error": "Request timed out after 3 attempts (10s each)."}
+    return {"success": False, "error": last_error}
 
 
 # ── Claude API ─────────────────────────────────────────────────────────────────
@@ -694,12 +714,11 @@ def render_campaign_creator() -> None:
                 )
             else:
                 err = page_data.get("error", "Unknown error")
-                is_blocked = "403" in err or "401" in err or "Forbidden" in err or "cloudflare" in err.lower()
-                if is_blocked:
+                if page_data.get("status_code") == 403:
                     st.warning(
-                        f"⚠️ This site blocks automated access (bot protection / Cloudflare).\n\n"
-                        f"**Workaround:** Copy the page text manually and paste it into the "
-                        f"**Product Description** field below — generation will still work."
+                        "⚠️ This site blocks automated access (bot protection / Cloudflare).\n\n"
+                        "**Workaround:** Copy the page text manually and paste it into the "
+                        "**Product Description** field below — generation will still work."
                     )
                 else:
                     st.error(f"Could not fetch page: {err}")
