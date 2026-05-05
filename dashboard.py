@@ -1268,8 +1268,10 @@ clients = fetch_clients(token, dev_token, root_cid, mcc_id)
 
 # ── Meta pre-fetch (needed before sidebar renders) ────────────────────────────
 _active_platform = st.session_state.get("_platform_radio", "🔵  Google Ads")
-_meta_token    = os.getenv("META_ACCESS_TOKEN", "")
+_meta_token      = os.getenv("META_ACCESS_TOKEN", "")
 _meta_accounts: list[dict] = []
+_meta_ready      = False   # True when module imported successfully
+
 if _meta_token:
     try:
         from meta_ads_server import (
@@ -1277,9 +1279,15 @@ if _meta_token:
             fetch_meta_campaigns, fetch_meta_daily,
             fetch_meta_adsets, fetch_meta_ads_list,
         )
+        _meta_ready = True
+    except Exception as _meta_import_err:
+        _meta_token = ""   # module missing — clear token
+
+if _meta_ready:
+    try:
         _meta_accounts = fetch_meta_accounts(_meta_token)
     except Exception:
-        _meta_token = ""
+        _meta_accounts = []   # API error: keep token for cross-platform fetches
 
 # ── Role helpers ──────────────────────────────────────────────────────────────
 _current_username = st.session_state.get("username", "")
@@ -1507,7 +1515,23 @@ _cross_meta_raw = _meta_id_for_google(selected_customer_id) if selected_customer
 _cross_meta_id  = (f"act_{_cross_meta_raw}" if _cross_meta_raw and not _cross_meta_raw.startswith("act_")
                    else _cross_meta_raw)
 
-if _is_admin and _cross_meta_id and _meta_token:
+# ── Debug panel (always visible to admin) ─────────────────────────────────────
+if _is_admin:
+    with st.expander("🔍 Debug — Cross-Platform", expanded=False):
+        st.write({
+            "selected_client":      selected_client,
+            "selected_customer_id": selected_customer_id,
+            "cross_meta_raw":       _cross_meta_raw,
+            "cross_meta_id":        _cross_meta_id,
+            "meta_token_set":       bool(_meta_token),
+            "meta_token_prefix":    _meta_token[:20] + "…" if _meta_token else "(empty)",
+            "meta_ready":           _meta_ready,
+            "meta_accounts_count":  len(_meta_accounts),
+            "active_platform":      _active_platform,
+            "is_admin":             _is_admin,
+        })
+
+if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
     with st.spinner("Loading cross-platform data…"):
         _cp_gdf  = fetch_campaign_data(selected_customer_id, token, dev_token, start_str, end_str, mcc_id)
         _cp_gday = fetch_daily_data(selected_customer_id, token, dev_token, start_str, end_str, mcc_id)
