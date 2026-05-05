@@ -1449,6 +1449,214 @@ with col_h2:
 
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
+# ── Platform selector ────────────────────────────────────────────────────────
+_platform = st.radio(
+    "platform",
+    ["🔵  Google Ads", "📘  Meta Ads"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="_platform_radio",
+)
+st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# META ADS
+# ══════════════════════════════════════════════════════════════════════════════
+if _platform == "📘  Meta Ads":
+    try:
+        from meta_ads_server import (
+            get_meta_token, fetch_meta_accounts,
+            fetch_meta_campaigns, fetch_meta_daily,
+        )
+        _meta_token = get_meta_token()
+    except Exception as _e:
+        st.warning(f"Meta Ads not configured: {_e}")
+        st.caption("Add META_APP_ID, META_APP_SECRET, META_ACCESS_TOKEN to .env")
+        _meta_token = None
+
+    if _meta_token:
+        with st.spinner("Loading Meta ad accounts…"):
+            _meta_accounts = fetch_meta_accounts(_meta_token)
+
+        if not _meta_accounts:
+            st.warning("No active Meta ad accounts found for this token.")
+        else:
+            # Account selector
+            _ma_options  = {a["name"]: a["id"] for a in _meta_accounts}
+            _ma_name     = st.selectbox("Meta Ad Account", list(_ma_options.keys()),
+                                        key="meta_account_sel")
+            _ma_id       = _ma_options[_ma_name]
+
+            with st.spinner(""):
+                _mdf_camp  = fetch_meta_campaigns(_meta_token, _ma_id, start_str, end_str)
+                _mdf_daily = fetch_meta_daily(_meta_token, _ma_id, start_str, end_str)
+
+            if _mdf_camp.empty:
+                st.info("No Meta campaign data for this date range.")
+            else:
+                # ── KPI totals ────────────────────────────────────────────────
+                _ms  = _mdf_camp["Cost"].sum()
+                _mc  = int(_mdf_camp["Clicks"].sum())
+                _mi  = int(_mdf_camp["Impressions"].sum())
+                _mcv = _mdf_camp["Conversions"].sum()
+                _mrv = _mdf_camp["Conv. Value"].sum()
+                _mctr  = (_mc / _mi * 100) if _mi else 0
+                _mcpc  = (_ms / _mc) if _mc else 0
+                _mcpa  = (_ms / _mcv) if _mcv else 0
+                _mroas = (_mrv / _ms) if _ms else 0
+                _mcr   = (_mcv / _mc * 100) if _mc else 0
+
+                # ── KPI Cards ─────────────────────────────────────────────────
+                st.markdown('<div class="sec-label">Meta Key Metrics</div>',
+                            unsafe_allow_html=True)
+                _mr_sub = "Excellent ✓" if _mroas >= 3 else "Good" if _mroas >= 1.5 else "Below target ⚠"
+                _mcols  = st.columns(9)
+                _mmetrics = [
+                    ("💸", "Total Spend",  fmt_currency(_ms),                        f"{len(_mdf_camp)} campaigns",  "#4267B2"),
+                    ("👁",  "Impressions",  fmt_number(_mi),                          "Total ad views",               "#d2a8ff"),
+                    ("🖱",  "Clicks",       fmt_number(_mc),                          "Total link clicks",            "#3fb950"),
+                    ("📊", "CTR",          f"{_mctr:.2f}%",                          "Click-through rate",           "#39c5d0"),
+                    ("⚡", "Avg. CPC",     fmt_currency(_mcpc),                      "Cost per click",               "#ffa657"),
+                    ("🎯", "Conversions",  f"{_mcv:,.1f}",                           "Purchases tracked",            "#ff6b9d"),
+                    ("💰", "CPA",          fmt_currency(_mcpa) if _mcv else "—",     "Cost per purchase",            "#e3b341"),
+                    ("🔄", "Conv. Rate",   f"{_mcr:.1f}%" if _mcv else "—",         f"{_mcr:.1f}% click-to-conv",   "#a5d6ff"),
+                    ("📈", "ROAS",         f"{_mroas:.2f}×",                         _mr_sub,                        "#3fb950" if _mroas >= 3 else "#f85149"),
+                ]
+                for _col, (_icon, _lbl, _val, _sub, _acc) in zip(_mcols, _mmetrics):
+                    _col.markdown(kpi_card(_icon, _lbl, _val, _sub, _acc), unsafe_allow_html=True)
+
+                # ── ROAS Hero ─────────────────────────────────────────────────
+                _mrc = "#3fb950" if _mroas >= 3 else "#58a6ff" if _mroas >= 1.5 else "#f0883e" if _mroas >= 1 else "#f85149"
+                _mrl = "Excellent" if _mroas >= 3 else "Good" if _mroas >= 1.5 else "Break-even" if _mroas >= 1 else "Below target"
+                st.markdown(f"""
+                <div class="roas-wrap" style="background:linear-gradient(135deg,#0e1a35,#0a1228);
+                     border:1px solid {hex_to_rgba(_mrc, 0.2)};">
+                  <div>
+                    <div style="font-size:10.5px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
+                                color:rgba(255,255,255,0.28);margin-bottom:6px">Meta ROAS</div>
+                    <div style="font-size:58px;font-weight:900;color:{_mrc};line-height:1;
+                                letter-spacing:-2.5px;text-shadow:0 0 50px {hex_to_rgba(_mrc,0.5)}">
+                      {_mroas:.2f}<span style="font-size:28px;opacity:0.7">×</span>
+                    </div>
+                  </div>
+                  <div class="roas-divider"></div>
+                  <div>
+                    <div class="roas-stat-label">Conv. Value</div>
+                    <div class="roas-stat-value">{fmt_currency(_mrv)}</div>
+                  </div>
+                  <div class="roas-divider"></div>
+                  <div>
+                    <div class="roas-stat-label">Total Spend</div>
+                    <div class="roas-stat-value">{fmt_currency(_ms)}</div>
+                  </div>
+                  <div class="roas-divider"></div>
+                  <div>
+                    <div class="roas-stat-label">Status</div>
+                    <div style="font-size:15px;font-weight:700;color:{_mrc}">{_mrl}</div>
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # ── Campaign Intelligence ─────────────────────────────────────
+                st.markdown('<div class="sec-label">Meta Campaign Intelligence</div>',
+                            unsafe_allow_html=True)
+                _m_decisions = {i: ai_decision(row) for i, row in _mdf_camp.iterrows()}
+                _mn_s = sum(1 for d in _m_decisions.values() if d["tier"] == "strong")
+                _mn_m = sum(1 for d in _m_decisions.values() if d["tier"] == "moderate")
+                _mn_w = sum(1 for d in _m_decisions.values() if d["tier"] == "weak")
+
+                st.markdown(f"""
+                <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;
+                            padding:14px 20px;background:#0a0d14;border:1px solid rgba(255,255,255,0.05);
+                            border-radius:12px;margin-bottom:18px;font-size:12px">
+                  <span style="color:rgba(255,255,255,0.3)">{len(_mdf_camp)} حملة</span>
+                  <span style="color:rgba(255,255,255,0.1)">|</span>
+                  <span style="color:#3fb950;font-weight:600">🟢 {_mn_s} Scale</span>
+                  <span style="color:#e3b341;font-weight:600">🟡 {_mn_m} Optimize</span>
+                  <span style="color:#f85149;font-weight:600">🔴 {_mn_w} Pause/Fix</span>
+                  <span style="margin-left:auto;font-size:11px;color:rgba(255,255,255,0.15)">
+                    {start_str} → {end_str}
+                  </span>
+                </div>
+                """, unsafe_allow_html=True)
+
+                _mc1, _mc2, _mc3 = st.columns([2, 2, 1])
+                _m_sort   = _mc1.selectbox("Sort meta", ["Cost","Clicks","CTR","Impressions","Conversions"],
+                                           label_visibility="collapsed", key="meta_sort")
+                _m_filter = _mc2.selectbox("Filter meta", ["الكل","🟢 Scale","🟡 Optimize","🔴 Pause/Fix"],
+                                           label_visibility="collapsed", key="meta_filter")
+                _m_asc    = _mc3.selectbox("Dir meta", ["↓ Desc","↑ Asc"],
+                                           label_visibility="collapsed", key="meta_dir") == "↑ Asc"
+
+                _m_tier_map = {"🟢 Scale": "strong", "🟡 Optimize": "moderate", "🔴 Pause/Fix": "weak"}
+                _mdf_sorted = _mdf_camp.sort_values(_m_sort, ascending=_m_asc)
+                _m_cards    = ""
+                for _mi2, _mrow in _mdf_sorted.iterrows():
+                    _md = _m_decisions[_mi2]
+                    if _m_filter != "الكل" and _md["tier"] != _m_tier_map.get(_m_filter, ""):
+                        continue
+                    _m_cards += campaign_card(_mrow, _md)
+
+                if _m_cards:
+                    st.markdown(_m_cards, unsafe_allow_html=True)
+                else:
+                    st.info("لا توجد حملات تطابق هذا الفلتر.")
+
+                # ── Daily chart ───────────────────────────────────────────────
+                if not _mdf_daily.empty:
+                    st.markdown('<div class="sec-label">Meta Daily Performance</div>',
+                                unsafe_allow_html=True)
+                    _mdf_plot = _mdf_daily.copy()
+                    _mdf_plot["ROAS"] = _mdf_plot.apply(
+                        lambda r: round(r["Conv. Value"] / r["Cost"], 2) if r["Cost"] > 0 else 0.0,
+                        axis=1)
+                    _mfig = go.Figure()
+                    _mfig.add_trace(go.Scatter(
+                        x=_mdf_plot["Date"], y=_mdf_plot["Cost"], name="Spend",
+                        mode="lines", line=dict(color="#4267B2", width=2.5, shape="spline"),
+                        fill="tozeroy",
+                        fillgradient=dict(type="vertical",
+                            colorscale=[[0,"rgba(66,103,178,0.28)"],[1,"rgba(66,103,178,0)"]]),
+                        hovertemplate="<b>Spend</b>: SAR %{y:,.2f}<extra></extra>",
+                    ))
+                    _mfig.add_trace(go.Scatter(
+                        x=_mdf_plot["Date"], y=_mdf_plot["Conv. Value"], name="Revenue",
+                        mode="lines", line=dict(color="#3fb950", width=2.5, shape="spline"),
+                        fill="tozeroy",
+                        fillgradient=dict(type="vertical",
+                            colorscale=[[0,"rgba(63,185,80,0.22)"],[1,"rgba(63,185,80,0)"]]),
+                        hovertemplate="<b>Revenue</b>: SAR %{y:,.2f}<extra></extra>",
+                    ))
+                    _mfig.add_trace(go.Scatter(
+                        x=_mdf_plot["Date"], y=_mdf_plot["ROAS"], name="ROAS",
+                        mode="lines", yaxis="y2",
+                        line=dict(color="#ffa657", width=2.5, shape="spline"),
+                        hovertemplate="<b>ROAS</b>: %{y:.2f}×<extra></extra>",
+                    ))
+                    _ml_max = max(_mdf_plot["Cost"].max(), _mdf_plot["Conv. Value"].max(), 1) * 1.35
+                    _mr_max = max(_mdf_plot["ROAS"].max() * 1.4, 5.0)
+                    _mfig.update_layout(
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0c1018",
+                        font=dict(family="Inter", color="rgba(255,255,255,0.3)", size=11),
+                        margin=dict(l=0, r=0, t=10, b=0), height=320,
+                        xaxis=dict(gridcolor="rgba(255,255,255,0.035)", tickformat="%b %d"),
+                        yaxis=dict(gridcolor="rgba(255,255,255,0.035)", tickprefix="SAR ",
+                                   range=[0, _ml_max]),
+                        yaxis2=dict(overlaying="y", side="right", showgrid=False,
+                                    ticksuffix="×", range=[0, _mr_max]),
+                        legend=dict(bgcolor="rgba(13,16,24,0.88)",
+                                    bordercolor="rgba(255,255,255,0.07)", borderwidth=1,
+                                    orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                        hovermode="x unified",
+                    )
+                    st.plotly_chart(_mfig, use_container_width=True)
+
+    st.stop()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GOOGLE ADS — all existing content below
+# ══════════════════════════════════════════════════════════════════════════════
+
 # ── Fetch data ────────────────────────────────────────────────────────────────
 customer_id = selected_customer_id
 
