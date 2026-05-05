@@ -150,10 +150,20 @@ def fetch_landing_page(url: str) -> dict:
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Cache-Control": "max-age=0",
         }
-        resp = requests.get(url, headers=headers, timeout=12)
+        session = requests.Session()
+        resp = session.get(url, headers=headers, timeout=15, allow_redirects=True)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -564,63 +574,63 @@ def _render_dgen_extras(result: dict) -> None:
 
 def _render_history() -> None:
     campaigns = _load_campaigns()
-    label = f"📁 Saved Campaigns ({len(campaigns)})" if campaigns else "📁 Saved Campaigns"
-    with st.expander(label, expanded=False):
-        if not campaigns:
-            st.caption("No saved campaigns yet. Generate and save one below.")
-            return
+    count_label = f" ({len(campaigns)})" if campaigns else ""
+    show = st.checkbox(f"📁 Saved Campaigns{count_label}", key="cc_show_history", value=False)
+    if not show:
+        return
+    if not campaigns:
+        st.caption("No saved campaigns yet. Generate and save one below.")
+        return
 
-        confirm_key = "_cc_confirm_delete"
+    confirm_key = "_cc_confirm_delete"
 
-        for camp in campaigns:
-            name  = camp.get("campaign_name", "Untitled")
-            ctype = camp.get("campaign_type", "")
-            ts    = camp.get("saved_at", "")[:10]
+    for camp in campaigns:
+        name  = camp.get("campaign_name", "Untitled")
+        ctype = camp.get("campaign_type", "")
+        ts    = camp.get("saved_at", "")[:10]
 
-            col_name, col_load, col_del = st.columns([5, 1, 1])
-            col_name.markdown(
-                f"<div style='padding-top:6px'>"
-                f"<span style='font-size:13px;font-weight:600;color:#e6edf3'>{name}</span>"
-                f"<span style='font-size:11px;color:rgba(255,255,255,0.3);margin-left:10px'>"
-                f"{ctype} · {ts}</span></div>",
-                unsafe_allow_html=True,
-            )
+        col_name, col_load, col_del = st.columns([5, 1, 1])
+        col_name.markdown(
+            f"<div style='padding-top:6px'>"
+            f"<span style='font-size:13px;font-weight:600;color:#e6edf3'>{name}</span>"
+            f"<span style='font-size:11px;color:rgba(255,255,255,0.3);margin-left:10px'>"
+            f"{ctype} · {ts}</span></div>",
+            unsafe_allow_html=True,
+        )
 
-            if col_load.button("Load", key=f"load_{name}", use_container_width=True):
-                st.session_state["cc_result"]        = camp.get("content")
-                st.session_state["cc_campaign_type"] = camp.get("campaign_type", "Search")
-                st.session_state["cc_loaded_name"]   = name
-                # Pre-fill inputs via session state so widgets pick them up
-                st.session_state["cc_ctype"]         = camp.get("campaign_type", "Search")
-                st.session_state["cc_angle"]         = camp.get("angle", ANGLES[0])
-                st.session_state["cc_language"]      = camp.get("language", LANGUAGES[0])
-                st.session_state["cc_url"]           = camp.get("url", "")
-                st.session_state["cc_page_data"]     = camp.get("page_data")
-                st.session_state["cc_campaign_name"] = name
+        if col_load.button("Load", key=f"load_{name}", use_container_width=True):
+            st.session_state["cc_result"]        = camp.get("content")
+            st.session_state["cc_campaign_type"] = camp.get("campaign_type", "Search")
+            st.session_state["cc_loaded_name"]   = name
+            st.session_state["cc_ctype"]         = camp.get("campaign_type", "Search")
+            st.session_state["cc_angle"]         = camp.get("angle", ANGLES[0])
+            st.session_state["cc_language"]      = camp.get("language", LANGUAGES[0])
+            st.session_state["cc_url"]           = camp.get("url", "")
+            st.session_state["cc_page_data"]     = camp.get("page_data")
+            st.session_state["cc_campaign_name"] = name
+            st.rerun()
+
+        confirming = st.session_state.get(confirm_key) == name
+        if confirming:
+            dc1, dc2, dc3 = st.columns([4, 1, 1])
+            dc1.caption(f"Delete **{name}**? Cannot be undone.")
+            if dc2.button("Yes", key=f"yes_del_{name}", type="primary",
+                          use_container_width=True):
+                _delete_campaign(name)
+                st.session_state.pop(confirm_key, None)
+                st.rerun()
+            if dc3.button("No", key=f"no_del_{name}", use_container_width=True):
+                st.session_state.pop(confirm_key, None)
+                st.rerun()
+        else:
+            if col_del.button("Delete", key=f"del_{name}", use_container_width=True):
+                st.session_state[confirm_key] = name
                 st.rerun()
 
-            # Delete with inline confirmation
-            confirming = st.session_state.get(confirm_key) == name
-            if confirming:
-                dc1, dc2, dc3 = st.columns([4, 1, 1])
-                dc1.caption(f"Delete **{name}**? Cannot be undone.")
-                if dc2.button("Yes", key=f"yes_del_{name}", type="primary",
-                              use_container_width=True):
-                    _delete_campaign(name)
-                    st.session_state.pop(confirm_key, None)
-                    st.rerun()
-                if dc3.button("No", key=f"no_del_{name}", use_container_width=True):
-                    st.session_state.pop(confirm_key, None)
-                    st.rerun()
-            else:
-                if col_del.button("Delete", key=f"del_{name}", use_container_width=True):
-                    st.session_state[confirm_key] = name
-                    st.rerun()
-
-            st.markdown(
-                "<hr style='border:none;border-top:1px solid rgba(255,255,255,0.05);margin:4px 0'>",
-                unsafe_allow_html=True,
-            )
+        st.markdown(
+            "<hr style='border:none;border-top:1px solid rgba(255,255,255,0.05);margin:4px 0'>",
+            unsafe_allow_html=True,
+        )
 
 
 # ── Main entry point ───────────────────────────────────────────────────────────
@@ -690,7 +700,7 @@ def render_campaign_creator() -> None:
 
     # Show what was fetched
     if page_data and page_data.get("success") and st.session_state.get("cc_url_fetched"):
-        with st.expander("📄 Fetched page content (used by AI)", expanded=False):
+        if st.checkbox("📄 Show fetched page content", key="cc_show_page", value=False):
             st.write(f"**Title:** {page_data.get('title','')}")
             st.write(f"**Meta description:** {page_data.get('meta_description','')}")
             headings = page_data.get("headings", [])
@@ -715,7 +725,7 @@ def render_campaign_creator() -> None:
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    can_generate = bool(page_data and page_data.get("success"))
+    can_generate = bool((page_data and page_data.get("success")) or product_desc.strip())
 
     generate_clicked = st.button(
         "🚀 توليد المحتوى",
@@ -725,14 +735,14 @@ def render_campaign_creator() -> None:
     )
 
     if not can_generate:
-        st.caption("Fetch a landing page successfully to enable generation.")
+        st.caption("Fetch a landing page or fill in a product description to enable generation.")
 
     if generate_clicked and can_generate:
         with st.spinner("Calling Claude AI — generating ad copy…"):
             result = call_claude(
                 campaign_type=campaign_type,
                 angle=angle,
-                page=page_data,
+                page=page_data or {"title": "", "meta_description": "", "headings": [], "body_text": ""},
                 product_desc=product_desc,
                 language=language,
             )
@@ -752,8 +762,8 @@ def render_campaign_creator() -> None:
     if "error" in result:
         st.error(f"Generation failed: {result['error']}")
         if "raw" in result:
-            with st.expander("Raw API response", expanded=False):
-                st.code(result["raw"])
+            st.caption("Raw API response:")
+            st.code(result["raw"])
         return
 
     ctype = st.session_state.get("cc_campaign_type", "Search")
