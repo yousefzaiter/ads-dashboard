@@ -693,7 +693,16 @@ def render_campaign_creator() -> None:
                     f"✓ Page fetched — \"{page_data.get('title','')[:70]}\""
                 )
             else:
-                st.error(f"Could not fetch page: {page_data.get('error', 'Unknown error')}")
+                err = page_data.get("error", "Unknown error")
+                is_blocked = "403" in err or "401" in err or "Forbidden" in err or "cloudflare" in err.lower()
+                if is_blocked:
+                    st.warning(
+                        f"⚠️ This site blocks automated access (bot protection / Cloudflare).\n\n"
+                        f"**Workaround:** Copy the page text manually and paste it into the "
+                        f"**Product Description** field below — generation will still work."
+                    )
+                else:
+                    st.error(f"Could not fetch page: {err}")
                 st.session_state["cc_page_data"] = None
 
     page_data = st.session_state.get("cc_page_data")
