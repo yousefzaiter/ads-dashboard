@@ -1515,23 +1515,6 @@ _cross_meta_raw = _meta_id_for_google(selected_customer_id) if selected_customer
 _cross_meta_id  = (f"act_{_cross_meta_raw}" if _cross_meta_raw and not _cross_meta_raw.startswith("act_")
                    else _cross_meta_raw)
 
-# ── TEMP DEBUG (remove after fix) ─────────────────────────────────────────────
-if _is_admin:
-    try:
-        with open(_CLIENTS_FILE, encoding="utf-8") as _dbgf:
-            _dbg_clients = json.load(_dbgf).get("clients", [])
-    except Exception as _dbge:
-        _dbg_clients = [{"error": str(_dbge)}]
-    st.info(
-        f"**DEBUG** | client=`{selected_client}` | "
-        f"google_cid=`{selected_customer_id}` | "
-        f"cross_meta_raw=`{_cross_meta_raw}` | "
-        f"cross_meta_id=`{_cross_meta_id}` | "
-        f"meta_token={'✓' if _meta_token else '✗'} | "
-        f"meta_ready={'✓' if _meta_ready else '✗'}"
-    )
-    st.write("**clients.json IDs:**", {c["username"]: (c.get("client_id",""), c.get("meta_account_id","")) for c in _dbg_clients})
-# ── END DEBUG ──────────────────────────────────────────────────────────────────
 
 if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
     with st.spinner("Loading cross-platform data…"):
