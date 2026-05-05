@@ -6,7 +6,6 @@ from pathlib import Path
 
 import requests
 import streamlit as st
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -144,78 +143,48 @@ def _section_header(title: str) -> None:
 
 # ── Landing page fetcher ───────────────────────────────────────────────────────
 
-_FETCH_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ar,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-}
-
-
-def _parse_page(html: str) -> dict:
-    soup = BeautifulSoup(html, "html.parser")
-
-    title_tag = soup.find("title")
-    title = title_tag.get_text(strip=True) if title_tag else ""
-
-    meta = soup.find("meta", {"name": "description"}) or soup.find(
-        "meta", {"property": "og:description"}
-    )
-    meta_desc = meta.get("content", "").strip() if meta else ""
-
-    h1s = [h.get_text(strip=True) for h in soup.find_all("h1")][:3]
-    h2s = [h.get_text(strip=True) for h in soup.find_all("h2")][:5]
-
-    for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
-        tag.decompose()
-    body_text = " ".join(soup.get_text(separator=" ").split()[:500])
-
-    return {
-        "success": True,
-        "title": title,
-        "meta_description": meta_desc,
-        "headings": [h for h in h1s + h2s if h],
-        "body_text": body_text,
-    }
-
-
 def fetch_landing_page(url: str) -> dict:
-    last_error = "Unknown error"
-    for attempt in range(3):
-        try:
-            resp = requests.get(
-                url,
-                headers=_FETCH_HEADERS,
-                timeout=10,
-                allow_redirects=True,
-            )
-            if resp.status_code == 403:
-                return {"success": False, "error": "403", "status_code": 403}
-            resp.raise_for_status()
-            return _parse_page(resp.text)
-        except requests.exceptions.Timeout:
-            last_error = "timeout"
-        except requests.exceptions.HTTPError as e:
-            code = e.response.status_code
-            if code == 403:
-                return {"success": False, "error": "403", "status_code": 403}
-            last_error = f"HTTP {code}: {e.response.reason}"
-            break  # non-403 HTTP errors won't improve on retry
-        except requests.exceptions.ConnectionError as e:
-            last_error = f"Connection error: {e}"
-        except Exception as e:
-            last_error = str(e)
-            break
+    """Fetch page content via Jina AI reader — bypasses Cloudflare, no API key needed."""
+    jina_url = f"https://r.jina.ai/{url}"
+    try:
+        resp = requests.get(jina_url, timeout=30)
+        resp.raise_for_status()
+        text = resp.text.strip()
 
-    if last_error == "timeout":
-        return {"success": False, "error": "Request timed out after 3 attempts (10s each)."}
-    return {"success": False, "error": last_error}
+        # Jina returns plain markdown-ish text. Extract title from first line if present.
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        title = ""
+        body_start = 0
+        if lines and lines[0].startswith("Title:"):
+            title = lines[0].removeprefix("Title:").strip()
+            body_start = 1
+
+        # Pull out any URL: / Description: metadata lines Jina prepends
+        meta_desc = ""
+        content_lines = []
+        for line in lines[body_start:]:
+            if line.startswith("URL Source:") or line.startswith("Markdown Content:"):
+                continue
+            if line.startswith("Description:") and not meta_desc:
+                meta_desc = line.removeprefix("Description:").strip()
+                continue
+            content_lines.append(line)
+
+        body_text = " ".join(" ".join(content_lines).split()[:500])
+
+        return {
+            "success": True,
+            "title": title,
+            "meta_description": meta_desc,
+            "headings": [],
+            "body_text": body_text,
+        }
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": "Request timed out (30s)."}
+    except requests.exceptions.HTTPError as e:
+        return {"success": False, "error": f"HTTP {e.response.status_code}: {e.response.reason}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 # ── Claude API ─────────────────────────────────────────────────────────────────
@@ -714,14 +683,11 @@ def render_campaign_creator() -> None:
                 )
             else:
                 err = page_data.get("error", "Unknown error")
-                if page_data.get("status_code") == 403:
-                    st.warning(
-                        "⚠️ This site blocks automated access (bot protection / Cloudflare).\n\n"
-                        "**Workaround:** Copy the page text manually and paste it into the "
-                        "**Product Description** field below — generation will still work."
-                    )
-                else:
-                    st.error(f"Could not fetch page: {err}")
+                st.error(f"Could not fetch page: {err}")
+                st.caption(
+                    "Tip: paste the page text into the Product Description field below "
+                    "to generate without fetching."
+                )
                 st.session_state["cc_page_data"] = None
 
     page_data = st.session_state.get("cc_page_data")
