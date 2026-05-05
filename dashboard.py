@@ -1515,21 +1515,6 @@ _cross_meta_raw = _meta_id_for_google(selected_customer_id) if selected_customer
 _cross_meta_id  = (f"act_{_cross_meta_raw}" if _cross_meta_raw and not _cross_meta_raw.startswith("act_")
                    else _cross_meta_raw)
 
-# ── Debug panel (always visible to admin) ─────────────────────────────────────
-if _is_admin:
-    with st.expander("🔍 Debug — Cross-Platform", expanded=False):
-        st.write({
-            "selected_client":      selected_client,
-            "selected_customer_id": selected_customer_id,
-            "cross_meta_raw":       _cross_meta_raw,
-            "cross_meta_id":        _cross_meta_id,
-            "meta_token_set":       bool(_meta_token),
-            "meta_token_prefix":    _meta_token[:20] + "…" if _meta_token else "(empty)",
-            "meta_ready":           _meta_ready,
-            "meta_accounts_count":  len(_meta_accounts),
-            "active_platform":      _active_platform,
-            "is_admin":             _is_admin,
-        })
 
 if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
     with st.spinner("Loading cross-platform data…"):
