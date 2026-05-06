@@ -273,15 +273,32 @@ def fetch_meta_adsets(token: str, campaign_id: str, start: str, end: str) -> pd.
     return _insights_to_df(data.get("data", []), "adset_id", "adset_name", "META_ADSET")
 
 
+_AD_DEEP_FIELDS = ",".join([
+    "ad_id", "ad_name",
+    "spend", "impressions", "clicks", "ctr", "cpc", "reach",
+    "actions", "action_values",
+    "video_thruplay_watched_actions",
+    "video_p25_watched_actions",
+    "video_p50_watched_actions",
+    "video_p75_watched_actions",
+    "outbound_clicks",
+    "outbound_clicks_ctr",
+])
+
+
+def _sum_video(items: list[dict]) -> float:
+    return sum(float(x.get("value", 0)) for x in (items or []))
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_meta_ads_list(token: str, adset_id: str, start: str, end: str) -> pd.DataFrame:
-    """Ad-level insights for a given ad set."""
+    """Ad-level insights with extended video and engagement metrics."""
     try:
         data = _get(
             f"/{adset_id}/insights",
             token,
             {
-                "fields":     "ad_id,ad_name,spend,impressions,clicks,ctr,cpc,actions,action_values",
+                "fields":     _AD_DEEP_FIELDS,
                 "level":      "ad",
                 "time_range": f'{{"since":"{start}","until":"{end}"}}',
                 "limit":      200,
@@ -293,4 +310,64 @@ def fetch_meta_ads_list(token: str, adset_id: str, start: str, end: str) -> pd.D
         else:
             st.error(f"Meta API error: {e}")
         return pd.DataFrame()
-    return _insights_to_df(data.get("data", []), "ad_id", "ad_name", "META_AD")
+
+    records = []
+    for row in data.get("data", []):
+        spend       = float(row.get("spend", 0) or 0)
+        impressions = int(row.get("impressions", 0) or 0)
+        clicks      = int(row.get("clicks", 0) or 0)
+        ctr         = float(row.get("ctr", 0) or 0)
+        cpc         = float(row.get("cpc", 0) or 0)
+        reach       = int(row.get("reach", 0) or 0)
+        actions     = row.get("actions", [])
+        action_vals = row.get("action_values", [])
+
+        conversions = _extract_action(actions, _PURCHASE_TYPES)
+        conv_value  = _extract_action(action_vals, _PURCHASE_TYPES)
+        roas        = round(conv_value / spend, 2) if spend > 0 else 0.0
+        cpa         = round(spend / conversions, 2) if conversions > 0 else 0.0
+        conv_rate   = round(conversions / clicks * 100, 2) if clicks > 0 else 0.0
+
+        # Video metrics
+        thruplay  = _sum_video(row.get("video_thruplay_watched_actions", []))
+        p25       = _sum_video(row.get("video_p25_watched_actions", []))
+        p75       = _sum_video(row.get("video_p75_watched_actions", []))
+        has_video = p25 > 0 or thruplay > 0
+
+        hook_val  = thruplay if thruplay > 0 else p25
+        hook_rate = round(hook_val / impressions * 100, 1) if impressions > 0 and has_video else 0.0
+        hold_rate = round(p75 / p25 * 100, 1) if p25 > 0 else 0.0
+
+        # Engagement metrics
+        frequency = round(impressions / reach, 2) if reach > 0 else 0.0
+        cpm       = round(spend / impressions * 1000, 2) if impressions > 0 else 0.0
+        ob_clicks = sum(float(x.get("value", 0)) for x in row.get("outbound_clicks", []))
+        lp_ctr    = round(ob_clicks / impressions * 100, 2) if impressions > 0 else 0.0
+
+        records.append({
+            "ID":          row.get("ad_id", ""),
+            "Campaign":    row.get("ad_name", ""),
+            "Campaign ID": "",
+            "Status":      "ENABLED",
+            "Type":        "META_AD",
+            "Impressions": impressions,
+            "Clicks":      clicks,
+            "Cost":        round(spend, 2),
+            "CTR":         round(ctr, 4),
+            "Avg CPC":     round(cpc, 2),
+            "Conversions": round(conversions, 1),
+            "Conv. Value": round(conv_value, 2),
+            "CPA":         cpa,
+            "ROAS":        roas,
+            "Imp. Share":  None,
+            "Reach":       reach,
+            "Frequency":   frequency,
+            "Hook Rate":   hook_rate,
+            "Hold Rate":   hold_rate,
+            "CPM":         cpm,
+            "LP CTR":      lp_ctr,
+            "Conv. Rate":  conv_rate,
+            "Has Video":   has_video,
+        })
+
+    return pd.DataFrame(records)

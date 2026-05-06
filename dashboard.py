@@ -1250,6 +1250,273 @@ def campaign_card(row: pd.Series, d: dict) -> str:
     </div>"""
 
 
+# ── Meta Ad deep analysis ──────────────────────────────────────────────────────
+
+def meta_ad_analysis(row: pd.Series) -> dict:
+    spend       = float(row.get("Cost", 0))
+    impressions = int(row.get("Impressions", 0))
+    clicks      = int(row.get("Clicks", 0))
+    ctr         = float(row.get("CTR", 0))
+    conversions = float(row.get("Conversions", 0))
+    conv_value  = float(row.get("Conv. Value", 0))
+    hook_rate   = float(row.get("Hook Rate", 0))
+    hold_rate   = float(row.get("Hold Rate", 0))
+    frequency   = float(row.get("Frequency", 0))
+    cpm         = float(row.get("CPM", 0))
+    lp_ctr      = float(row.get("LP CTR", 0))
+    has_video   = bool(row.get("Has Video", False))
+    roas        = float(row.get("ROAS", 0))
+    conv_rate   = float(row.get("Conv. Rate", 0))
+
+    diagnoses: list[tuple[str, str]] = []
+
+    if has_video:
+        if hook_rate > 30:
+            diagnoses.append(("green", f"Hook قوي {hook_rate:.0f}% — الإعلان يجذب الانتباه"))
+        elif 0 < hook_rate < 15:
+            diagnoses.append(("red",   f"Hook ضعيف {hook_rate:.0f}% — أول 3 ثواني لا تجذب"))
+        elif hook_rate > 0:
+            diagnoses.append(("yellow", f"Hook متوسط {hook_rate:.0f}%"))
+        if hold_rate > 60:
+            diagnoses.append(("green", f"Hold Rate {hold_rate:.0f}% — المحتوى ممتع، الناس يكملون"))
+        elif 0 < hold_rate < 30:
+            diagnoses.append(("red",   f"Hold Rate {hold_rate:.0f}% — الناس يتركون بعد الأول"))
+
+    if ctr > 2:
+        diagnoses.append(("green",  f"CTR {ctr:.2f}% — ممتاز، الإعلان مقنع"))
+    elif ctr < 0.5:
+        diagnoses.append(("red",    f"CTR {ctr:.2f}% — ضعيف، الـ Creative أو الجمهور غلط"))
+    else:
+        diagnoses.append(("yellow", f"CTR {ctr:.2f}% — متوسط"))
+
+    if conv_rate > 3:
+        diagnoses.append(("green", f"Conv Rate {conv_rate:.1f}% — صفحة الهبوط فعّالة"))
+    elif conv_rate < 0.5 and ctr >= 1 and clicks > 10:
+        diagnoses.append(("red", f"Conv Rate {conv_rate:.1f}% مع CTR جيد = مشكلة في صفحة الهبوط"))
+
+    if frequency > 3:
+        diagnoses.append(("yellow", f"Frequency {frequency:.1f} — تشبع إعلاني مرتفع، غيّر الـ Creative"))
+
+    if roas >= 3:
+        diagnoses.append(("green", f"ROAS {roas:.2f}× — مربح، قابل للتوسع"))
+    elif 0 < roas < 1 and spend >= 10:
+        diagnoses.append(("red", f"ROAS {roas:.2f}× — الإعلان يخسر مع كل ريال"))
+
+    # Decision
+    if spend >= 40 and conversions == 0:
+        dec, emoji, color = "Pause",    "🔴", "#f85149"
+        action  = "أوقف الإعلان — إنفاق بلا تحويلات"
+        outcome = "وقف نزيف الإنفاق وإعادة بناء الإعلان"
+    elif 0 < roas < 1 and spend >= 20:
+        dec, emoji, color = "Pause",    "🔴", "#f85149"
+        action  = "أوقف فوراً — الإعلان يخسر مع كل ريال"
+        outcome = "وقف الخسائر الفورية"
+    elif roas >= 3 and conversions > 0:
+        dec, emoji, color = "Scale",    "🟢", "#3fb950"
+        action  = "ارفع الميزانية 20-30% أسبوعياً"
+        outcome = "زيادة المبيعات مع الحفاظ على الـ ROAS"
+    elif has_video and 0 < hook_rate < 15:
+        dec, emoji, color = "Optimize", "🟡", "#d29922"
+        action  = "غيّر الـ Hook — أعد تصوير أول 3 ثواني"
+        outcome = "تحسين Hook Rate يرفع الـ CTR والتحويلات"
+    elif frequency > 3:
+        dec, emoji, color = "Optimize", "🟡", "#d29922"
+        action  = "جدد الـ Creative — الجمهور تعب من الإعلان"
+        outcome = "خفض التكلفة وتحسين الأداء بـ Creative جديد"
+    elif impressions < 500 and spend < 5:
+        dec, emoji, color = "Wait",     "🔵", "#58a6ff"
+        action  = "بيانات غير كافية — أعطِ الإعلان 3-5 أيام"
+        outcome = "تقييم دقيق بعد تجميع بيانات كافية"
+    else:
+        dec, emoji, color = "Optimize", "🟡", "#d29922"
+        action  = "راجع الاستهداف والـ Creative لتحسين الأداء"
+        outcome = "تحسين معدل التحويل والـ ROAS"
+
+    # Reason string
+    parts = []
+    if has_video and hook_rate > 0:
+        parts.append(f"Hook {hook_rate:.0f}%")
+    if hold_rate > 0:
+        parts.append(f"Hold {hold_rate:.0f}%")
+    parts.append(f"CTR {ctr:.2f}%")
+    if conv_rate > 0:
+        parts.append(f"Conv {conv_rate:.1f}%")
+    if roas > 0:
+        parts.append(f"ROAS {roas:.2f}×")
+    if frequency > 0:
+        parts.append(f"Freq {frequency:.1f}")
+
+    if dec == "Pause" and conversions == 0:
+        suffix = "→ إنفاق بلا نتائج"
+    elif dec == "Pause":
+        suffix = "→ الإعلان يخسر"
+    elif dec == "Scale":
+        suffix = "→ إعلان مربح، قابل للتوسع"
+    elif has_video and 0 < hook_rate < 15:
+        suffix = "→ لا يجذب في الثواني الأولى"
+    elif frequency > 3:
+        suffix = "→ الجمهور تشبّع"
+    else:
+        suffix = ""
+
+    reason = "  ·  ".join(parts) + (f"  {suffix}" if suffix else "")
+
+    return {
+        "dec": dec, "emoji": emoji, "dec_color": color,
+        "diagnoses": diagnoses, "reason": reason,
+        "action": action, "outcome": outcome,
+        "roas": roas, "conv_rate": conv_rate, "has_video": has_video,
+    }
+
+
+def meta_ad_deep_card(row: pd.Series, analysis: dict) -> str:
+    name        = str(row.get("Campaign", ""))
+    spend       = float(row.get("Cost", 0))
+    impressions = int(row.get("Impressions", 0))
+    clicks      = int(row.get("Clicks", 0))
+    ctr         = float(row.get("CTR", 0))
+    cpc         = float(row.get("Avg CPC", 0))
+    conversions = float(row.get("Conversions", 0))
+    roas        = float(row.get("ROAS", 0))
+    hook_rate   = float(row.get("Hook Rate", 0))
+    hold_rate   = float(row.get("Hold Rate", 0))
+    frequency   = float(row.get("Frequency", 0))
+    cpm         = float(row.get("CPM", 0))
+    lp_ctr      = float(row.get("LP CTR", 0))
+    conv_rate   = float(row.get("Conv. Rate", 0))
+    has_video   = bool(row.get("Has Video", False))
+
+    dc        = analysis["dec_color"]
+    bg_tint   = hex_to_rgba(dc, 0.04)
+    border_c  = hex_to_rgba(dc, 0.22)
+
+    creative_tag = (
+        '<span style="font-size:9px;color:rgba(255,255,255,0.3);background:rgba(255,255,255,0.06);'
+        'padding:2px 8px;border-radius:6px">🎬 Video</span>'
+        if has_video else
+        '<span style="font-size:9px;color:rgba(255,255,255,0.3);background:rgba(255,255,255,0.06);'
+        'padding:2px 8px;border-radius:6px">🖼 Image</span>'
+    )
+
+    def chip(label, val, col="rgba(255,255,255,0.75)"):
+        return (
+            f'<div style="text-align:center;padding:6px 10px;background:rgba(255,255,255,0.03);'
+            f'border-radius:8px;min-width:68px">'
+            f'<div style="font-size:8.5px;color:rgba(255,255,255,0.2);letter-spacing:.5px;'
+            f'text-transform:uppercase;margin-bottom:3px">{label}</div>'
+            f'<div style="font-size:13px;font-weight:700;color:{col}">{val}</div></div>'
+        )
+
+    def adv(label, val, col):
+        return (
+            f'<div style="text-align:center;padding:5px 10px;background:rgba(255,255,255,0.02);'
+            f'border:1px solid rgba(255,255,255,0.06);border-radius:8px;min-width:68px">'
+            f'<div style="font-size:8px;color:rgba(255,255,255,0.18);letter-spacing:.5px;'
+            f'text-transform:uppercase;margin-bottom:3px">{label}</div>'
+            f'<div style="font-size:12px;font-weight:700;color:{col}">{val}</div></div>'
+        )
+
+    G, Y, R, DIM = "#3fb950", "#d29922", "#f85149", "rgba(255,255,255,0.35)"
+
+    roas_c = G if roas >= 3 else R if 0 < roas < 1 else Y if roas > 0 else DIM
+    ctr_c  = G if ctr > 2 else R if ctr < 0.5 else Y
+    cr_c   = G if conv_rate > 3 else R if conv_rate < 0.5 and conv_rate > 0 else Y if conv_rate > 0 else DIM
+    hk_c   = G if hook_rate > 30 else R if 0 < hook_rate < 15 else Y if hook_rate > 0 else DIM
+    hd_c   = G if hold_rate > 60 else R if 0 < hold_rate < 30 else Y if hold_rate > 0 else DIM
+    fr_c   = R if frequency > 3 else G if frequency > 0 else DIM
+    lp_c   = G if lp_ctr > 1.5 else Y if lp_ctr > 0.5 else R if lp_ctr > 0 else DIM
+
+    perf = (
+        chip("Spend",   f"SAR {spend:,.0f}") +
+        chip("Impr.",   fmt_number(impressions)) +
+        chip("Clicks",  f"{clicks:,}") +
+        chip("CTR",     f"{ctr:.2f}%",    ctr_c) +
+        chip("CPC",     f"SAR {cpc:.2f}") +
+        chip("Conv.",   f"{conversions:.0f}") +
+        chip("Conv%",   f"{conv_rate:.1f}%", cr_c) +
+        (chip("ROAS",   f"{roas:.1f}×",   roas_c) if roas > 0 else "")
+    )
+
+    adv_chips = []
+    if has_video:
+        adv_chips += [adv("Hook Rate", f"{hook_rate:.0f}%", hk_c),
+                      adv("Hold Rate", f"{hold_rate:.0f}%", hd_c)]
+    adv_chips.append(adv("CPM",       f"SAR {cpm:.1f}",    DIM))
+    adv_chips.append(adv("Frequency", f"{frequency:.1f}",  fr_c))
+    if lp_ctr > 0:
+        adv_chips.append(adv("LP CTR", f"{lp_ctr:.2f}%",  lp_c))
+    adv_row = "".join(adv_chips)
+
+    color_map = {"green": G, "yellow": Y, "red": R}
+    icon_map  = {"green": "✓", "yellow": "⚡", "red": "✗"}
+    diag_html = "".join(
+        f'<div style="font-size:11.5px;color:{color_map[c]};margin-bottom:5px;'
+        f'display:flex;align-items:flex-start;gap:6px">'
+        f'<span style="flex-shrink:0">{icon_map[c]}</span><span>{t}</span></div>'
+        for c, t in analysis["diagnoses"]
+    )
+
+    dec_badge = (
+        f'<span style="display:inline-flex;align-items:center;gap:6px;padding:4px 14px;'
+        f'background:{hex_to_rgba(dc,0.12)};border:1px solid {border_c};'
+        f'border-radius:20px;font-size:12px;font-weight:800;color:{dc}">'
+        f'{analysis["emoji"]} القرار: {analysis["dec"]}</span>'
+    )
+
+    return f"""
+    <div style="background:#0d1018;border:1px solid rgba(255,255,255,0.055);
+                border-left:3px solid {dc};border-radius:14px;
+                margin-bottom:14px;overflow:hidden">
+      <div style="padding:14px 18px 10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:13.5px;font-weight:600;color:#e6edf3;
+                      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px"
+               title="{name}">{name[:52]}{"…" if len(name)>52 else ""}</div>
+          <div style="margin-top:5px;display:flex;align-items:center;gap:8px">
+            <span style="font-size:10px;color:#3fb950;font-weight:700">● Active</span>
+            {creative_tag}
+          </div>
+        </div>
+      </div>
+      <div style="padding:4px 18px 12px">
+        <div style="font-size:8.5px;color:rgba(255,255,255,0.15);letter-spacing:1px;
+                    text-transform:uppercase;margin-bottom:8px">Performance</div>
+        <div style="display:flex;gap:7px;flex-wrap:wrap">{perf}</div>
+      </div>
+      <div style="padding:0 18px 14px;border-top:1px solid rgba(255,255,255,0.04)">
+        <div style="font-size:8.5px;color:rgba(255,255,255,0.15);letter-spacing:1px;
+                    text-transform:uppercase;margin:10px 0 8px">Advanced Metrics</div>
+        <div style="display:flex;gap:7px;flex-wrap:wrap">{adv_row}</div>
+      </div>
+      <div style="padding:14px 20px 18px;border-top:1px solid rgba(255,255,255,0.04);
+                  background:{bg_tint};direction:rtl;text-align:right">
+        <div style="font-size:8.5px;color:rgba(255,255,255,0.15);letter-spacing:1px;
+                    text-transform:uppercase;margin-bottom:12px;direction:ltr;text-align:left">
+          AI Analysis</div>
+        <div style="margin-bottom:12px">{dec_badge}</div>
+        <div style="font-size:10.5px;color:rgba(255,255,255,0.22);font-weight:600;
+                    margin-bottom:8px">تشخيص الإعلان:</div>
+        <div style="margin-bottom:12px">{diag_html}</div>
+        <div style="font-size:10.5px;color:rgba(255,255,255,0.22);font-weight:600;
+                    margin-bottom:6px">السبب بالأرقام:</div>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-bottom:12px;
+                    direction:ltr;text-align:left;font-family:monospace;
+                    background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px">
+          {analysis["reason"]}</div>
+        <div style="font-size:10.5px;color:rgba(255,255,255,0.22);font-weight:600;
+                    margin-bottom:6px">الإجراء المطلوب:</div>
+        <div style="font-size:12.5px;color:rgba(255,255,255,0.72);margin-bottom:12px;
+                    background:rgba(255,255,255,0.04);border-right:3px solid {dc};
+                    padding:8px 12px;border-radius:6px;line-height:1.55">
+          💡 {analysis["action"]}</div>
+        <div style="font-size:10.5px;color:rgba(255,255,255,0.22);font-weight:600;
+                    margin-bottom:5px">النتيجة المتوقعة:</div>
+        <div style="font-size:12px;color:{dc};display:flex;align-items:flex-start;gap:6px">
+          <span>→</span><span>{analysis["outcome"]}</span></div>
+      </div>
+    </div>"""
+
+
 # ── Session state ─────────────────────────────────────────────────────────────
 st.session_state.setdefault("client_name_visible", False)
 st.session_state.setdefault("_show_send_panel", False)
@@ -2062,9 +2329,9 @@ if _platform == "📘  Meta Ads":
         if _mdf_ads.empty:
             st.info(f"No ad data for '{_adset_name}' in this date range.")
         else:
-            _ad_decisions = {i: ai_decision(row) for i, row in _mdf_ads.iterrows()}
-            for _adidx, _adrow in _mdf_ads.sort_values("Cost", ascending=False).iterrows():
-                st.markdown(campaign_card(_adrow, _ad_decisions[_adidx]), unsafe_allow_html=True)
+            for _, _adrow in _mdf_ads.sort_values("Cost", ascending=False).iterrows():
+                _analysis = meta_ad_analysis(_adrow)
+                st.markdown(meta_ad_deep_card(_adrow, _analysis), unsafe_allow_html=True)
 
     st.stop()
 
