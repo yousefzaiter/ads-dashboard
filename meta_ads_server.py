@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
 
 META_API_BASE = "https://graph.facebook.com/v20.0"
 
@@ -172,3 +172,79 @@ def fetch_meta_daily(token: str, account_id: str, start: str, end: str) -> pd.Da
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
     return df
+
+
+# ── Ad-set drill-down ─────────────────────────────────────────────────────────
+
+def _insights_to_df(rows: list[dict], id_key: str, name_key: str, entity_type: str) -> pd.DataFrame:
+    records = []
+    for row in rows:
+        spend       = float(row.get("spend", 0) or 0)
+        impressions = int(row.get("impressions", 0) or 0)
+        clicks      = int(row.get("clicks", 0) or 0)
+        ctr         = float(row.get("ctr", 0) or 0)
+        cpc         = float(row.get("cpc", 0) or 0)
+        actions     = row.get("actions", [])
+        action_vals = row.get("action_values", [])
+        conversions = _extract_action(actions, _PURCHASE_TYPES)
+        conv_value  = _extract_action(action_vals, _PURCHASE_TYPES)
+        roas        = round(conv_value / spend, 2) if spend > 0 else 0.0
+        cpa         = round(spend / conversions, 2) if conversions > 0 else 0.0
+        records.append({
+            "ID":          row.get(id_key, ""),
+            "Campaign":    row.get(name_key, ""),
+            "Campaign ID": "",
+            "Status":      "ENABLED",
+            "Type":        entity_type,
+            "Impressions": impressions,
+            "Clicks":      clicks,
+            "Cost":        round(spend, 2),
+            "CTR":         round(ctr, 4),
+            "Avg CPC":     round(cpc, 2),
+            "Conversions": round(conversions, 1),
+            "Conv. Value": round(conv_value, 2),
+            "CPA":         cpa,
+            "ROAS":        roas,
+            "Imp. Share":  None,
+        })
+    return pd.DataFrame(records)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_meta_adsets(token: str, campaign_id: str, start: str, end: str) -> pd.DataFrame:
+    """Ad-set-level insights for a given campaign."""
+    try:
+        data = _get(
+            f"/{campaign_id}/insights",
+            token,
+            {
+                "fields":     "adset_id,adset_name,spend,impressions,clicks,ctr,cpc,actions,action_values",
+                "level":      "adset",
+                "time_range": f'{{"since":"{start}","until":"{end}"}}',
+                "limit":      200,
+            },
+        )
+    except RuntimeError as e:
+        st.error(f"Meta API error: {e}")
+        return pd.DataFrame()
+    return _insights_to_df(data.get("data", []), "adset_id", "adset_name", "META_ADSET")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_meta_ads_list(token: str, adset_id: str, start: str, end: str) -> pd.DataFrame:
+    """Ad-level insights for a given ad set."""
+    try:
+        data = _get(
+            f"/{adset_id}/insights",
+            token,
+            {
+                "fields":     "ad_id,ad_name,spend,impressions,clicks,ctr,cpc,actions,action_values",
+                "level":      "ad",
+                "time_range": f'{{"since":"{start}","until":"{end}"}}',
+                "limit":      200,
+            },
+        )
+    except RuntimeError as e:
+        st.error(f"Meta API error: {e}")
+        return pd.DataFrame()
+    return _insights_to_df(data.get("data", []), "ad_id", "ad_name", "META_AD")
