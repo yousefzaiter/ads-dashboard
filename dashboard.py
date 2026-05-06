@@ -1272,14 +1272,20 @@ _meta_token      = os.getenv("META_ACCESS_TOKEN", "")
 _meta_accounts: list[dict] = []
 _meta_ready      = False   # True when module imported successfully
 
+_meta_token_status: dict = {"status": "unknown", "days_left": 0, "message": ""}
 if _meta_token:
     try:
         from meta_ads_server import (
             get_meta_token, fetch_meta_accounts,
             fetch_meta_campaigns, fetch_meta_daily,
             fetch_meta_adsets, fetch_meta_ads_list,
+            get_token_status as _get_meta_token_status,
         )
         _meta_ready = True
+        _meta_token_status = _get_meta_token_status()
+        # If token was refreshed in-process, reload it
+        if _meta_token_status.get("status") == "refreshed":
+            _meta_token = os.getenv("META_ACCESS_TOKEN", _meta_token)
     except Exception as _meta_import_err:
         _meta_token = ""   # module missing — clear token
 
@@ -1421,8 +1427,32 @@ with st.sidebar:
         st.rerun()
 
     if _is_admin:
-        _src_api  = "Meta Marketing API v20" if _active_platform == "📘  Meta Ads" else "Google Ads API v20"
-        _src_note = "Token valid ~60 days"    if _active_platform == "📘  Meta Ads" else "Auto-refresh every 5 min"
+        _src_api = "Meta Marketing API v20" if _active_platform == "📘  Meta Ads" else "Google Ads API v20"
+        if _active_platform == "📘  Meta Ads":
+            _ts  = _meta_token_status
+            _tst = _ts.get("status", "unknown")
+            _tdl = _ts.get("days_left", 0)
+            if _tst == "refreshed":
+                _src_note = "🔄 Token auto-refreshed — valid 60 days"
+                _note_col = "#3fb950"
+            elif _tst == "ok" and _tdl == 9999:
+                _src_note = "✓ Token never expires"
+                _note_col = "#3fb950"
+            elif _tst == "ok":
+                _src_note = f"✓ Token valid — {_tdl} days remaining"
+                _note_col = "#3fb950" if _tdl > 7 else "#d29922"
+            elif _tst == "expired":
+                _src_note = "✗ Token expired — paste new token in .env"
+                _note_col = "#f85149"
+            elif _tst == "no_credentials":
+                _src_note = "⚠ META_APP_ID/SECRET missing — auto-refresh disabled"
+                _note_col = "#d29922"
+            else:
+                _src_note = _ts.get("message", "Token status unknown")
+                _note_col = "rgba(255,255,255,0.2)"
+        else:
+            _src_note = "Auto-refresh every 5 min"
+            _note_col = "rgba(255,255,255,0.2)"
         st.markdown(f"""
         <div style='margin-top:24px;padding:14px;background:rgba(255,255,255,0.03);
                     border-radius:12px;border:1px solid rgba(255,255,255,0.05)'>
@@ -1430,7 +1460,7 @@ with st.sidebar:
                       text-transform:uppercase;margin-bottom:8px'>Data source</div>
           <div style='font-size:11.5px;color:rgba(255,255,255,0.45);font-weight:500'>
             {_src_api}</div>
-          <div style='font-size:10.5px;color:rgba(255,255,255,0.2);margin-top:2px'>
+          <div style='font-size:10.5px;color:{_note_col};margin-top:2px'>
             {_src_note}</div>
         </div>
         """, unsafe_allow_html=True)

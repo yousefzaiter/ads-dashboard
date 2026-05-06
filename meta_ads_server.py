@@ -12,14 +12,44 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 META_API_BASE = "https://graph.facebook.com/v20.0"
 
+# ── Auto-refresh token on import ──────────────────────────────────────────────
+_token_status: dict = {"status": "unknown", "days_left": 0, "message": ""}
+try:
+    from token_manager import refresh_if_needed as _refresh_token
+    _token_status = _refresh_token()
+except Exception as _tm_err:
+    _token_status = {"status": "error", "days_left": 0, "message": str(_tm_err)}
+
 
 # ── Low-level request ─────────────────────────────────────────────────────────
+
+_EXPIRED_PHRASES = ("Session has expired", "Error validating access token",
+                    "Invalid OAuth access token", "OAuthException")
+
+_MSG_EXPIRED_AR = (
+    "جاري تحديث صلاحية الوصول لميتا...  "
+    "انتهت صلاحية التوكن. يرجى نسخ توكن جديد من "
+    "[Graph API Explorer](https://developers.facebook.com/tools/explorer/) "
+    "وتحديثه في لوحة الإعدادات."
+)
+
+
+def _is_token_error(text: str) -> bool:
+    return any(p in text for p in _EXPIRED_PHRASES)
+
+
+def _show_token_error() -> None:
+    st.error(_MSG_EXPIRED_AR)
+
 
 def _get(path: str, token: str, params: dict | None = None) -> dict:
     p = {"access_token": token, **(params or {})}
     resp = requests.get(f"{META_API_BASE}{path}", params=p, timeout=20)
     if resp.status_code != 200:
-        raise RuntimeError(f"Meta API {resp.status_code}: {resp.text[:400]}")
+        msg = resp.text[:400]
+        if _is_token_error(msg):
+            raise RuntimeError("TOKEN_EXPIRED")
+        raise RuntimeError(f"Meta API {resp.status_code}: {msg}")
     return resp.json()
 
 
@@ -30,6 +60,11 @@ def get_meta_token() -> str:
     if not token:
         raise ValueError("META_ACCESS_TOKEN not set in .env")
     return token
+
+
+def get_token_status() -> dict:
+    """Return the token status dict computed at import time."""
+    return _token_status
 
 
 # ── Ad accounts ───────────────────────────────────────────────────────────────
@@ -90,7 +125,10 @@ def fetch_meta_campaigns(token: str, account_id: str, start: str, end: str) -> p
             },
         )
     except RuntimeError as e:
-        st.error(f"Meta API error: {e}")
+        if "TOKEN_EXPIRED" in str(e):
+            _show_token_error()
+        else:
+            st.error(f"Meta API error: {e}")
         return pd.DataFrame()
 
     records = []
@@ -151,7 +189,9 @@ def fetch_meta_daily(token: str, account_id: str, start: str, end: str) -> pd.Da
                 "limit":      90,
             },
         )
-    except RuntimeError:
+    except RuntimeError as e:
+        if "TOKEN_EXPIRED" in str(e):
+            _show_token_error()
         return pd.DataFrame()
 
     records = []
@@ -225,7 +265,10 @@ def fetch_meta_adsets(token: str, campaign_id: str, start: str, end: str) -> pd.
             },
         )
     except RuntimeError as e:
-        st.error(f"Meta API error: {e}")
+        if "TOKEN_EXPIRED" in str(e):
+            _show_token_error()
+        else:
+            st.error(f"Meta API error: {e}")
         return pd.DataFrame()
     return _insights_to_df(data.get("data", []), "adset_id", "adset_name", "META_ADSET")
 
@@ -245,6 +288,9 @@ def fetch_meta_ads_list(token: str, adset_id: str, start: str, end: str) -> pd.D
             },
         )
     except RuntimeError as e:
-        st.error(f"Meta API error: {e}")
+        if "TOKEN_EXPIRED" in str(e):
+            _show_token_error()
+        else:
+            st.error(f"Meta API error: {e}")
         return pd.DataFrame()
     return _insights_to_df(data.get("data", []), "ad_id", "ad_name", "META_AD")
