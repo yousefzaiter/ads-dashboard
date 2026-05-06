@@ -24,9 +24,8 @@ _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
 _STAT_FIELDS = ",".join([
     "impressions", "swipes", "spend",
-    "video_views", "screen_time_millis",
+    "video_views",
     "quartile_1", "quartile_2", "quartile_3", "view_completion",
-    "swipe_up_attribution_purchases", "view_attribution_purchases",
     "conversion_purchases", "conversion_purchases_value",
 ])
 
@@ -101,20 +100,24 @@ def refresh_snap_token() -> str | None:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _ts(date_str: str, end: bool = False) -> str:
-    """Convert YYYY-MM-DD to Snap API ISO-8601 timestamp."""
-    return f"{date_str}T{'23:59:59.999' if end else '00:00:00.000'}Z"
+    """Convert YYYY-MM-DD to Snap API ISO-8601 timestamp.
+    Snap requires exact hour boundaries — use next-day midnight for end times."""
+    from datetime import date as _date, timedelta as _td
+    if end:
+        next_day = (_date.fromisoformat(date_str) + _td(days=1)).isoformat()
+        return f"{next_day}T00:00:00.000+03:00"
+    return f"{date_str}T00:00:00.000+03:00"
 
 
-def _parse_total_stats(timeseries_stat: dict) -> dict:
-    """Extract metrics from a TOTAL-granularity timeseries_stat object."""
-    ts = timeseries_stat.get("total_stats", {})
-    spend_micro = float(ts.get("spend", 0) or 0)
+def _parse_stats(stats: dict) -> dict:
+    """Extract metrics from a Snap stats dict (already the inner 'stats' object)."""
+    spend_micro = float(stats.get("spend", 0) or 0)
     spend       = spend_micro / 1_000_000
-    impressions = int(ts.get("impressions", 0) or 0)
-    swipes      = int(ts.get("swipes", 0) or 0)
-    video_views = int(ts.get("video_views", 0) or 0)
-    conv        = int(ts.get("conversion_purchases", 0) or 0)
-    conv_value  = float(ts.get("conversion_purchases_value", 0) or 0) / 1_000_000
+    impressions = int(stats.get("impressions", 0) or 0)
+    swipes      = int(stats.get("swipes", 0) or 0)
+    video_views = int(stats.get("video_views", 0) or 0)
+    conv        = int(stats.get("conversion_purchases", 0) or 0)
+    conv_value  = float(stats.get("conversion_purchases_value", 0) or 0) / 1_000_000
 
     swipe_rate = round(swipes / impressions * 100, 4) if impressions > 0 else 0.0
     cps        = round(spend / swipes, 2)         if swipes > 0      else 0.0
@@ -132,8 +135,13 @@ def _parse_total_stats(timeseries_stat: dict) -> dict:
     }
 
 
+def _parse_total_stats(timeseries_stat: dict) -> dict:
+    """Legacy wrapper — kept for _fetch_stats compatibility."""
+    return _parse_stats(timeseries_stat.get("total_stats", {}))
+
+
 def _empty_stats() -> dict:
-    return _parse_total_stats({})
+    return _parse_stats({})
 
 
 def _to_df_row(name: str, entity_id: str, parent_id: str,
@@ -160,16 +168,17 @@ def _to_df_row(name: str, entity_id: str, parent_id: str,
 
 
 def _fetch_stats(path: str, token: str, start: str, end: str) -> dict:
+    """Fetch TOTAL-granularity stats. Response: total_stats[0].total_stat.stats"""
     resp = _get(path, token, {
         "granularity": "TOTAL",
         "start_time":  _ts(start),
         "end_time":    _ts(end, end=True),
         "fields":      _STAT_FIELDS,
     })
-    rows = resp.get("timeseries_stats", [])
+    rows = resp.get("total_stats", [])
     if not rows:
         return _empty_stats()
-    return _parse_total_stats(rows[0].get("timeseries_stat", {}))
+    return _parse_stats(rows[0].get("total_stat", {}).get("stats", {}))
 
 
 # ── Ad accounts ───────────────────────────────────────────────────────────────
@@ -215,7 +224,8 @@ def fetch_snap_campaigns(token: str, account_id: str,
         camp_id = c.get("id", "")
         try:
             s = _fetch_stats(f"/campaigns/{camp_id}/stats", token, start, end)
-        except Exception:
+        except Exception as ex:
+            st.warning(f"Snap stats error for {c.get('name', camp_id)}: {ex}")
             s = _empty_stats()
         records.append(_to_df_row(
             c.get("name", ""), camp_id, account_id,
@@ -231,36 +241,52 @@ def fetch_snap_campaigns(token: str, account_id: str,
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_snap_daily(token: str, account_id: str,
                      start: str, end: str) -> pd.DataFrame:
-    """Daily breakdown for a Snap ad account."""
+    """Daily breakdown aggregated across all active campaigns.
+    Account-level stats only support 'spend'; we use campaign-level DAY stats."""
     try:
-        resp = _get(f"/adaccounts/{account_id}/stats", token, {
-            "granularity": "DAY",
-            "start_time":  _ts(start),
-            "end_time":    _ts(end, end=True),
-            "fields":      "impressions,swipes,spend,conversion_purchases,conversion_purchases_value",
-        })
-    except Exception:
+        resp = _get(f"/adaccounts/{account_id}/campaigns", token)
+    except RuntimeError:
         return pd.DataFrame()
 
-    records = []
-    for row in resp.get("timeseries_stats", []):
-        for pt in row.get("timeseries_stat", {}).get("timeseries", []):
-            day   = pt.get("start_time", "")[:10]
-            stats = pt.get("stats", {})
-            spend      = float(stats.get("spend", 0) or 0) / 1_000_000
-            conv_value = float(stats.get("conversion_purchases_value", 0) or 0) / 1_000_000
-            records.append({
-                "Date":        day,
-                "Impressions": int(stats.get("impressions", 0) or 0),
-                "Clicks":      int(stats.get("swipes", 0) or 0),
-                "Cost":        round(spend, 2),
-                "Conversions": float(stats.get("conversion_purchases", 0) or 0),
-                "Conv. Value": round(conv_value, 2),
-            })
+    daily: dict[str, dict] = {}
+    _daily_fields = "impressions,swipes,spend,conversion_purchases,conversion_purchases_value"
 
+    for c_wrap in resp.get("campaigns", []):
+        c       = c_wrap.get("campaign", {})
+        camp_id = c.get("id", "")
+        try:
+            dr = _get(f"/campaigns/{camp_id}/stats", token, {
+                "granularity": "DAY",
+                "start_time":  _ts(start),
+                "end_time":    _ts(end, end=True),
+                "fields":      _daily_fields,
+            })
+        except Exception:
+            continue
+        for row in dr.get("timeseries_stats", []):
+            for pt in row.get("timeseries_stat", {}).get("timeseries", []):
+                day   = pt.get("start_time", "")[:10]
+                stats = pt.get("stats", {})
+                spend      = float(stats.get("spend", 0) or 0) / 1_000_000
+                conv_value = float(stats.get("conversion_purchases_value", 0) or 0) / 1_000_000
+                if day not in daily:
+                    daily[day] = {"Impressions": 0, "Clicks": 0,
+                                  "Cost": 0.0, "Conversions": 0.0, "Conv. Value": 0.0}
+                daily[day]["Impressions"] += int(stats.get("impressions", 0) or 0)
+                daily[day]["Clicks"]      += int(stats.get("swipes", 0) or 0)
+                daily[day]["Cost"]        += spend
+                daily[day]["Conversions"] += float(stats.get("conversion_purchases", 0) or 0)
+                daily[day]["Conv. Value"] += conv_value
+
+    if not daily:
+        return pd.DataFrame()
+
+    records = [{"Date": day, **vals} for day, vals in sorted(daily.items())]
+    for r in records:
+        r["Cost"]        = round(r["Cost"], 2)
+        r["Conv. Value"] = round(r["Conv. Value"], 2)
     df = pd.DataFrame(records)
-    if not df.empty:
-        df["Date"] = pd.to_datetime(df["Date"])
+    df["Date"] = pd.to_datetime(df["Date"])
     return df
 
 
