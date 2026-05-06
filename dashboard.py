@@ -267,6 +267,18 @@ def _meta_id_for_google(google_cid: str) -> str:
     return ""
 
 
+def _snap_id_for_google(google_cid: str) -> str:
+    """Return snap_account_id from clients.json for the given Google Ads customer ID."""
+    try:
+        with open(_CLIENTS_FILE, encoding="utf-8") as _f:
+            for _c in json.load(_f).get("clients", []):
+                if _c.get("client_id", "").replace("-", "") == google_cid.replace("-", ""):
+                    return _c.get("snap_account_id", "")
+    except Exception:
+        pass
+    return ""
+
+
 def hex_to_rgba(h: str, a: float) -> str:
     h = h.lstrip("#")
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
@@ -960,6 +972,8 @@ TYPE_LABELS = {
     "SEARCH": "Search", "SHOPPING": "Shopping",
     "PERFORMANCE_MAX": "Perf. Max", "DISPLAY": "Display",
     "VIDEO": "Video", "DEMAND_GEN": "Demand Gen",
+    "META": "Meta", "META_ADSET": "Meta Ad Set", "META_AD": "Meta Ad",
+    "SNAP": "Snap", "SNAP_ADSET": "Snap Ad Squad", "SNAP_AD": "Snap Ad",
 }
 
 def ai_decision(row: pd.Series) -> dict:
@@ -1523,6 +1537,9 @@ st.session_state.setdefault("_show_send_panel", False)
 st.session_state.setdefault("meta_view", "campaigns")       # campaigns | adsets | ads
 st.session_state.setdefault("meta_selected_campaign", None) # {id, name}
 st.session_state.setdefault("meta_selected_adset", None)    # {id, name}
+st.session_state.setdefault("snap_view", "campaigns")
+st.session_state.setdefault("snap_selected_campaign", None)
+st.session_state.setdefault("snap_selected_adset", None)
 
 # ── Auth (needed early for client list) ───────────────────────────────────────
 try:
@@ -1561,6 +1578,27 @@ if _meta_ready:
         _meta_accounts = fetch_meta_accounts(_meta_token)
     except Exception:
         _meta_accounts = []   # API error: keep token for cross-platform fetches
+
+# ── Snap pre-fetch ────────────────────────────────────────────────────────────
+_snap_token    = os.getenv("SNAP_ACCESS_TOKEN", "")
+_snap_accounts: list[dict] = []
+_snap_ready    = False
+
+if _snap_token:
+    try:
+        from snap_ads_server import (
+            fetch_snap_accounts, fetch_snap_campaigns, fetch_snap_daily,
+            fetch_snap_adsets, fetch_snap_ads,
+        )
+        _snap_ready = True
+    except Exception:
+        _snap_token = ""
+
+if _snap_ready:
+    try:
+        _snap_accounts = fetch_snap_accounts(_snap_token)
+    except Exception:
+        _snap_accounts = []
 
 # ── Role helpers ──────────────────────────────────────────────────────────────
 _current_username = st.session_state.get("username", "")
@@ -1634,9 +1672,13 @@ with st.sidebar:
             selected_customer_id = sel["id"]
             selected_meta_acct_id   = ""
             selected_meta_acct_name = ""
-        else:  # Meta Ads
+            selected_snap_acct_id   = ""
+            selected_snap_acct_name = ""
+        elif _active_platform == "📘  Meta Ads":
             selected_client      = ""
             selected_customer_id = ""
+            selected_snap_acct_id   = ""
+            selected_snap_acct_name = ""
             if _meta_accounts:
                 _ma_sb_opts = {a["name"]: a["id"] for a in _meta_accounts}
                 _ma_sb_sel  = st.selectbox(
@@ -1651,6 +1693,25 @@ with st.sidebar:
                 st.warning("No Meta accounts found")
                 selected_meta_acct_id   = ""
                 selected_meta_acct_name = ""
+        else:  # Snap Ads
+            selected_client      = ""
+            selected_customer_id = ""
+            selected_meta_acct_id   = ""
+            selected_meta_acct_name = ""
+            if _snap_accounts:
+                _sa_sb_opts = {a["name"]: a["id"] for a in _snap_accounts}
+                _sa_sb_sel  = st.selectbox(
+                    "SNAP ACCOUNT",
+                    list(_sa_sb_opts.keys()),
+                    key="snap_account_sel",
+                    label_visibility="visible",
+                )
+                selected_snap_acct_id   = _sa_sb_opts[_sa_sb_sel]
+                selected_snap_acct_name = _sa_sb_sel
+            else:
+                st.warning("No Snap accounts found")
+                selected_snap_acct_id   = ""
+                selected_snap_acct_name = ""
     else:
         assigned_cid  = user_info.get("client_id", "")
         assigned_name = next((n for n, c in clients.items() if c == assigned_cid), _display_name)
@@ -1658,6 +1719,8 @@ with st.sidebar:
         selected_customer_id    = assigned_cid
         selected_meta_acct_id   = ""
         selected_meta_acct_name = ""
+        selected_snap_acct_id   = ""
+        selected_snap_acct_name = ""
 
     if _is_admin:
         st.divider()
@@ -1694,8 +1757,8 @@ with st.sidebar:
         st.rerun()
 
     if _is_admin:
-        _src_api = "Meta Marketing API v20" if _active_platform == "📘  Meta Ads" else "Google Ads API v20"
         if _active_platform == "📘  Meta Ads":
+            _src_api = "Meta Marketing API v20"
             _tst = _meta_token_status.get("status", "unknown")
             _tdl = _meta_token_status.get("days_left", 0)
             if _tst == "expired":
@@ -1710,7 +1773,12 @@ with st.sidebar:
             else:
                 _src_note = "✓ Token active"
                 _note_col = "#3fb950"
+        elif _active_platform == "🟡  Snap Ads":
+            _src_api  = "Snapchat Marketing API v1"
+            _src_note = "✓ Token active" if _snap_ready else "✗ Token missing"
+            _note_col = "#3fb950" if _snap_ready else "#f85149"
         else:
+            _src_api  = "Google Ads API v20"
             _src_note = "Auto-refresh every 5 min"
             _note_col = "rgba(255,255,255,0.2)"
         st.markdown(f"""
@@ -1804,14 +1872,16 @@ st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 _cross_meta_raw = _meta_id_for_google(selected_customer_id) if selected_customer_id else ""
 _cross_meta_id  = (f"act_{_cross_meta_raw}" if _cross_meta_raw and not _cross_meta_raw.startswith("act_")
                    else _cross_meta_raw)
+_cross_snap_id  = _snap_id_for_google(selected_customer_id) if selected_customer_id else ""
 
-
-if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
+if _is_admin and (_cross_meta_id or _cross_snap_id) and selected_customer_id:
     with st.spinner("Loading cross-platform data…"):
         _cp_gdf  = fetch_campaign_data(selected_customer_id, token, dev_token, start_str, end_str, mcc_id)
         _cp_gday = fetch_daily_data(selected_customer_id, token, dev_token, start_str, end_str, mcc_id)
-        _cp_mdf  = fetch_meta_campaigns(_meta_token, _cross_meta_id, start_str, end_str)
-        _cp_mday = fetch_meta_daily(_meta_token, _cross_meta_id, start_str, end_str)
+        _cp_mdf  = fetch_meta_campaigns(_meta_token, _cross_meta_id, start_str, end_str) if _cross_meta_id and _meta_token and _meta_ready else pd.DataFrame()
+        _cp_mday = fetch_meta_daily(_meta_token, _cross_meta_id, start_str, end_str)     if _cross_meta_id and _meta_token and _meta_ready else pd.DataFrame()
+        _cp_sdf  = fetch_snap_campaigns(_snap_token, _cross_snap_id, start_str, end_str) if _cross_snap_id and _snap_token and _snap_ready else pd.DataFrame()
+        _cp_sday = fetch_snap_daily(_snap_token, _cross_snap_id, start_str, end_str)     if _cross_snap_id and _snap_token and _snap_ready else pd.DataFrame()
 
     # ── Google aggregates ─────────────────────────────────────────────────────
     _g_spend = _cp_gdf["Cost"].sum()        if not _cp_gdf.empty else 0.0
@@ -1837,38 +1907,57 @@ if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
     _m_cpc   = round(_m_spend/ _m_clicks, 2) if _m_clicks else 0.0
     _m_cr    = round(_m_conv / _m_clicks*100,2) if _m_clicks else 0.0
 
+    # ── Snap aggregates ───────────────────────────────────────────────────────
+    _sn_spend = _cp_sdf["Cost"].sum()        if not _cp_sdf.empty else 0.0
+    _sn_clicks= int(_cp_sdf["Clicks"].sum()) if not _cp_sdf.empty else 0
+    _sn_imps  = int(_cp_sdf["Impressions"].sum()) if not _cp_sdf.empty else 0
+    _sn_conv  = _cp_sdf["Conversions"].sum() if not _cp_sdf.empty else 0.0
+    _sn_rev   = _cp_sdf["Conv. Value"].sum() if not _cp_sdf.empty else 0.0
+    _sn_roas  = round(_sn_rev  / _sn_spend,  2) if _sn_spend  else 0.0
+    _sn_cpa   = round(_sn_spend/ _sn_conv,   2) if _sn_conv   else 0.0
+    _sn_ctr   = round(_sn_clicks/_sn_imps*100,2) if _sn_imps  else 0.0
+
+    _has_snap_cp = _sn_spend > 0
+
     # ── Combined totals ───────────────────────────────────────────────────────
-    _t_spend = _g_spend + _m_spend
-    _t_conv  = _g_conv  + _m_conv
-    _t_rev   = _g_rev   + _m_rev
+    _t_spend = _g_spend + _m_spend + _sn_spend
+    _t_conv  = _g_conv  + _m_conv  + _sn_conv
+    _t_rev   = _g_rev   + _m_rev   + _sn_rev
     _t_roas  = round(_t_rev / _t_spend, 2) if _t_spend else 0.0
     _t_cpa   = round(_t_spend / _t_conv, 2) if _t_conv  else 0.0
 
     # ── Spend split ───────────────────────────────────────────────────────────
-    _g_pct = round(_g_spend / _t_spend * 100) if _t_spend else 50
-    _m_pct = 100 - _g_pct
+    _g_pct  = round(_g_spend  / _t_spend * 100) if _t_spend else 0
+    _m_pct  = round(_m_spend  / _t_spend * 100) if _t_spend else 0
+    _sn_pct = 100 - _g_pct - _m_pct
 
     # ── Best platform ─────────────────────────────────────────────────────────
-    _best_is_google = _g_roas >= _m_roas
-    _best_lbl  = "Google" if _best_is_google else "Meta"
-    _best_icon = "🔵" if _best_is_google else "📘"
-    _best_roas = _g_roas if _best_is_google else _m_roas
-    _other_roas= _m_roas if _best_is_google else _g_roas
-    _roas_diff = round((_best_roas - _other_roas) / _other_roas * 100) if _other_roas else 0
+    _platform_roas = {"Google": _g_roas, "Meta": _m_roas}
+    if _has_snap_cp:
+        _platform_roas["Snap"] = _sn_roas
+    _best_lbl  = max(_platform_roas, key=_platform_roas.get)
+    _best_icon = {"Google": "🔵", "Meta": "📘", "Snap": "🟡"}[_best_lbl]
+    _best_roas = _platform_roas[_best_lbl]
+    _sorted_roas = sorted(_platform_roas.values(), reverse=True)
+    _roas_diff = round((_sorted_roas[0] - _sorted_roas[1]) / _sorted_roas[1] * 100) if len(_sorted_roas) > 1 and _sorted_roas[1] else 0
 
     def _roas_color(v: float) -> str:
         return "#3fb950" if v >= 3 else "#58a6ff" if v >= 1.5 else "#f0883e" if v >= 1 else "#f85149"
 
-    def _trow(label: str, gval: str, mval: str, tval: str, highlight: bool = False) -> str:
+    def _trow(label: str, gval: str, mval: str, tval: str, highlight: bool = False, snval: str = "") -> str:
         bg = "rgba(255,255,255,0.03)" if highlight else "transparent"
+        snap_col = f"<td style='padding:10px 14px;color:#FFFC00;font-size:13px;font-weight:700;text-align:right'>{snval}</td>" if _has_snap_cp else ""
         return (
             f"<tr style='background:{bg}'>"
             f"<td style='padding:10px 14px;color:rgba(255,255,255,0.5);font-size:12px;font-weight:600'>{label}</td>"
             f"<td style='padding:10px 14px;color:#58a6ff;font-size:13px;font-weight:700;text-align:right'>{gval}</td>"
             f"<td style='padding:10px 14px;color:#4267B2;font-size:13px;font-weight:700;text-align:right'>{mval}</td>"
+            f"{snap_col}"
             f"<td style='padding:10px 14px;color:#f0f6fc;font-size:13px;font-weight:800;text-align:right'>{tval}</td>"
             f"</tr>"
         )
+
+    _snap_th = '<th style="padding:8px 14px;font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#FFFC00;text-align:right">🟡 Snap</th>' if _has_snap_cp else ""
 
     _cp_table = f"""
     <table style="width:100%;border-collapse:collapse;margin:16px 0">
@@ -1880,28 +1969,51 @@ if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
                      text-transform:uppercase;color:#58a6ff;text-align:right">🔵 Google</th>
           <th style="padding:8px 14px;font-size:10px;font-weight:700;letter-spacing:1.2px;
                      text-transform:uppercase;color:#4267B2;text-align:right">📘 Meta</th>
+          {_snap_th}
           <th style="padding:8px 14px;font-size:10px;font-weight:700;letter-spacing:1.2px;
                      text-transform:uppercase;color:rgba(255,255,255,0.5);text-align:right">📊 المجموع</th>
         </tr>
       </thead>
       <tbody>
-        {_trow("الصرف",       fmt_currency(_g_spend), fmt_currency(_m_spend), fmt_currency(_t_spend), True)}
-        {_trow("المبيعات",    fmt_currency(_g_rev),   fmt_currency(_m_rev),   fmt_currency(_t_rev))}
-        {_trow("ROAS",         f"{_g_roas:.2f}×",      f"{_m_roas:.2f}×",      f"{_t_roas:.2f}× (مرجّح)", True)}
-        {_trow("التحويلات",   f"{_g_conv:,.1f}",       f"{_m_conv:,.1f}",      f"{_t_conv:,.1f}")}
-        {_trow("CPA",          fmt_currency(_g_cpa) if _g_conv else "—",
-                               fmt_currency(_m_cpa) if _m_conv else "—",
-                               fmt_currency(_t_cpa) if _t_conv else "—", True)}
-        {_trow("CTR",          f"{_g_ctr:.2f}%", f"{_m_ctr:.2f}%", "—")}
-        {_trow("CPC",          fmt_currency(_g_cpc) if _g_clicks else "—",
-                               fmt_currency(_m_cpc) if _m_clicks else "—", "—", True)}
+        {_trow("الصرف",       fmt_currency(_g_spend), fmt_currency(_m_spend), fmt_currency(_t_spend), True,  fmt_currency(_sn_spend) if _has_snap_cp else "")}
+        {_trow("المبيعات",    fmt_currency(_g_rev),   fmt_currency(_m_rev),   fmt_currency(_t_rev),   False, fmt_currency(_sn_rev)   if _has_snap_cp else "")}
+        {_trow("ROAS",         f"{_g_roas:.2f}×",      f"{_m_roas:.2f}×",      f"{_t_roas:.2f}× (مرجّح)", True, f"{_sn_roas:.2f}×" if _has_snap_cp else "")}
+        {_trow("التحويلات",   f"{_g_conv:,.1f}",       f"{_m_conv:,.1f}",      f"{_t_conv:,.1f}",     False, f"{_sn_conv:,.1f}" if _has_snap_cp else "")}
+        {_trow("CPA",          fmt_currency(_g_cpa)  if _g_conv  else "—",
+                               fmt_currency(_m_cpa)  if _m_conv  else "—",
+                               fmt_currency(_t_cpa)  if _t_conv  else "—", True,
+                               fmt_currency(_sn_cpa) if _sn_conv else "—")}
+        {_trow("CTR / Swipe Rate", f"{_g_ctr:.2f}%", f"{_m_ctr:.2f}%", "—", False, f"{_sn_ctr:.2f}%" if _has_snap_cp else "")}
+        {_trow("CPC / Cost per Swipe", fmt_currency(_g_cpc) if _g_clicks else "—",
+                                       fmt_currency(_m_cpc) if _m_clicks else "—", "—", True,
+                                       fmt_currency(round(_sn_spend/_sn_clicks,2)) if _sn_clicks else "—")}
         {_trow("Conv Rate",    f"{_g_cr:.2f}%", f"{_m_cr:.2f}%", "—")}
       </tbody>
     </table>
     """
 
-    _g_roas_dot = "🟢" if _g_roas >= 3 else "🟡" if _g_roas >= 1.5 else "🔴"
-    _m_roas_dot = "🟢" if _m_roas >= 3 else "🟡" if _m_roas >= 1.5 else "🔴"
+    _g_roas_dot  = "🟢" if _g_roas  >= 3 else "🟡" if _g_roas  >= 1.5 else "🔴"
+    _m_roas_dot  = "🟢" if _m_roas  >= 3 else "🟡" if _m_roas  >= 1.5 else "🔴"
+    _sn_roas_dot = "🟢" if _sn_roas >= 3 else "🟡" if _sn_roas >= 1.5 else "🔴"
+
+    _snap_roas_badge = f"""
+        <div style="font-size:12px;color:rgba(255,255,255,0.2)">vs</div>
+        <div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.04);
+                    border-radius:8px;padding:8px 14px">
+          <span style="font-size:12px;color:#FFFC00;font-weight:600">🟡 Snap</span>
+          <span style="font-size:16px;font-weight:800;color:{_roas_color(_sn_roas)}">{_sn_roas:.2f}×</span>
+          <span>{_sn_roas_dot}</span>
+        </div>""" if _has_snap_cp else ""
+
+    _snap_spend_bar = f"""
+        <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+          <div style="width:72px;font-size:11px;color:#FFFC00;font-weight:600">🟡 Snap</div>
+          <div style="flex:1;background:rgba(255,255,255,0.06);border-radius:4px;height:10px;overflow:hidden">
+            <div style="width:{_sn_pct}%;height:100%;background:linear-gradient(90deg,#FFFC00,#b8b800);border-radius:4px"></div>
+          </div>
+          <div style="width:52px;font-size:12px;color:rgba(255,255,255,0.6);font-weight:700;text-align:right">{_sn_pct}%</div>
+          <div style="width:80px;font-size:11px;color:rgba(255,255,255,0.4);text-align:right">{fmt_currency(_sn_spend)}</div>
+        </div>""" if _has_snap_cp else ""
 
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#0d1117,#0e1521);
@@ -1940,6 +2052,7 @@ if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
           <div style="width:52px;font-size:12px;color:rgba(255,255,255,0.6);font-weight:700;text-align:right">{_m_pct}%</div>
           <div style="width:80px;font-size:11px;color:rgba(255,255,255,0.4);text-align:right">{fmt_currency(_m_spend)}</div>
         </div>
+        {_snap_spend_bar}
       </div>
 
       <div style="display:flex;align-items:center;gap:24px;margin:18px 0 14px;flex-wrap:wrap">
@@ -1958,6 +2071,7 @@ if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
           <span style="font-size:16px;font-weight:800;color:{_roas_color(_m_roas)}">{_m_roas:.2f}×</span>
           <span>{_m_roas_dot}</span>
         </div>
+        {_snap_roas_badge}
       </div>
 
       <div style="background:linear-gradient(90deg,rgba(63,185,80,0.12),rgba(63,185,80,0.04));
@@ -1972,7 +2086,7 @@ if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
 
     # ── Daily Breakdown (collapsible) ─────────────────────────────────────────
     _show_daily = st.checkbox("📅 عرض التفاصيل اليومية", key="cp_daily_toggle")
-    if _show_daily and (not _cp_gday.empty or not _cp_mday.empty):
+    if _show_daily and (not _cp_gday.empty or not _cp_mday.empty or not _cp_sday.empty):
         if not _cp_gday.empty:
             _cp_gday = _cp_gday.copy()
             _cp_gday["Date"] = pd.to_datetime(_cp_gday["Date"])
@@ -1983,29 +2097,44 @@ if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
             _cp_mday["Date"] = pd.to_datetime(_cp_mday["Date"])
             _cp_mday["M_ROAS"] = _cp_mday.apply(
                 lambda r: round(r["Conv. Value"] / r["Cost"], 2) if r["Cost"] > 0 else 0.0, axis=1)
+        if not _cp_sday.empty:
+            _cp_sday = _cp_sday.copy()
+            _cp_sday["Date"] = pd.to_datetime(_cp_sday["Date"])
+            _cp_sday["S_ROAS"] = _cp_sday.apply(
+                lambda r: round(r["Conv. Value"] / r["Cost"], 2) if r["Cost"] > 0 else 0.0, axis=1)
 
         _all_dates = sorted(set(
             list(_cp_gday["Date"].dt.date if not _cp_gday.empty else []) +
-            list(_cp_mday["Date"].dt.date if not _cp_mday.empty else [])
+            list(_cp_mday["Date"].dt.date if not _cp_mday.empty else []) +
+            list(_cp_sday["Date"].dt.date if not _cp_sday.empty else [])
         ))
 
         _daily_rows = ""
         for _dt in _all_dates:
             _gday_row = _cp_gday[_cp_gday["Date"].dt.date == _dt] if not _cp_gday.empty else pd.DataFrame()
             _mday_row = _cp_mday[_cp_mday["Date"].dt.date == _dt] if not _cp_mday.empty else pd.DataFrame()
+            _sday_row = _cp_sday[_cp_sday["Date"].dt.date == _dt] if not _cp_sday.empty else pd.DataFrame()
             _gs = _gday_row["Cost"].sum()    if not _gday_row.empty else 0.0
             _gr = _gday_row["G_ROAS"].mean() if not _gday_row.empty else 0.0
             _ms = _mday_row["Cost"].sum()    if not _mday_row.empty else 0.0
             _mr = _mday_row["M_ROAS"].mean() if not _mday_row.empty else 0.0
-            _ts = _gs + _ms
-            _tr = round(
-                (_gday_row["Conv. Value"].sum() + _mday_row["Conv. Value"].sum()) / _ts, 2
-            ) if _ts else 0.0
+            _sns = _sday_row["Cost"].sum()    if not _sday_row.empty else 0.0
+            _snr = _sday_row["S_ROAS"].mean() if not _sday_row.empty else 0.0
+            _ts = _gs + _ms + _sns
+            _all_rv = ((_gday_row["Conv. Value"].sum() if not _gday_row.empty else 0.0) +
+                       (_mday_row["Conv. Value"].sum() if not _mday_row.empty else 0.0) +
+                       (_sday_row["Conv. Value"].sum() if not _sday_row.empty else 0.0))
+            _tr = round(_all_rv / _ts, 2) if _ts else 0.0
             _row_color = "rgba(63,185,80,0.06)" if _tr >= 3 else \
                          "rgba(248,81,73,0.06)"  if _tr > 0 and _tr < 1 else "transparent"
-            _gr_c = _roas_color(_gr)
-            _mr_c = _roas_color(_mr)
-            _tr_c = _roas_color(_tr)
+            _gr_c  = _roas_color(_gr)
+            _mr_c  = _roas_color(_mr)
+            _snr_c = _roas_color(_snr)
+            _tr_c  = _roas_color(_tr)
+            _snap_cells = (
+                f"<td style='padding:7px 12px;font-size:11px;color:#FFFC00;text-align:right'>{fmt_currency(_sns)}</td>"
+                f"<td style='padding:7px 12px;font-size:11px;font-weight:700;color:{_snr_c};text-align:right'>{_snr:.2f}×</td>"
+            ) if _has_snap_cp else ""
             _daily_rows += (
                 f"<tr style='background:{_row_color};border-bottom:1px solid rgba(255,255,255,0.04)'>"
                 f"<td style='padding:7px 12px;font-size:11px;color:rgba(255,255,255,0.4)'>{_dt.strftime('%b %d')}</td>"
@@ -2013,10 +2142,16 @@ if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
                 f"<td style='padding:7px 12px;font-size:11px;font-weight:700;color:{_gr_c};text-align:right'>{_gr:.2f}×</td>"
                 f"<td style='padding:7px 12px;font-size:11px;color:#4267B2;text-align:right'>{fmt_currency(_ms)}</td>"
                 f"<td style='padding:7px 12px;font-size:11px;font-weight:700;color:{_mr_c};text-align:right'>{_mr:.2f}×</td>"
+                f"{_snap_cells}"
                 f"<td style='padding:7px 12px;font-size:11px;color:rgba(255,255,255,0.6);text-align:right'>{fmt_currency(_ts)}</td>"
                 f"<td style='padding:7px 12px;font-size:11px;font-weight:800;color:{_tr_c};text-align:right'>{_tr:.2f}×</td>"
                 f"</tr>"
             )
+
+        _snap_daily_ths = (
+            '<th style="padding:8px 12px;font-size:10px;color:#FFFC00;text-align:right">Snap Spend</th>'
+            '<th style="padding:8px 12px;font-size:10px;color:#FFFC00;text-align:right">Snap ROAS</th>'
+        ) if _has_snap_cp else ""
 
         st.markdown(f"""
         <div style="background:#0a0d14;border:1px solid rgba(255,255,255,0.06);
@@ -2030,6 +2165,7 @@ if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
                 <th style="padding:8px 12px;font-size:10px;color:#58a6ff;text-align:right">Google ROAS</th>
                 <th style="padding:8px 12px;font-size:10px;color:#4267B2;text-align:right">Meta Spend</th>
                 <th style="padding:8px 12px;font-size:10px;color:#4267B2;text-align:right">Meta ROAS</th>
+                {_snap_daily_ths}
                 <th style="padding:8px 12px;font-size:10px;color:rgba(255,255,255,0.4);text-align:right">Total Spend</th>
                 <th style="padding:8px 12px;font-size:10px;color:rgba(255,255,255,0.4);text-align:right">Total ROAS</th>
               </tr>
@@ -2042,9 +2178,10 @@ if _is_admin and _cross_meta_id and _meta_token and _meta_ready:
     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
 # ── Platform selector ────────────────────────────────────────────────────────
+_snap_options = ["🔵  Google Ads", "📘  Meta Ads"] + (["🟡  Snap Ads"] if _snap_ready else [])
 _platform = st.radio(
     "platform",
-    ["🔵  Google Ads", "📘  Meta Ads"],
+    _snap_options,
     horizontal=True,
     label_visibility="collapsed",
     key="_platform_radio",
@@ -2332,6 +2469,289 @@ if _platform == "📘  Meta Ads":
             for _, _adrow in _mdf_ads.sort_values("Cost", ascending=False).iterrows():
                 _analysis = meta_ad_analysis(_adrow)
                 st.markdown(meta_ad_deep_card(_adrow, _analysis), unsafe_allow_html=True)
+
+    st.stop()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SNAP ADS
+# ══════════════════════════════════════════════════════════════════════════════
+if _platform == "🟡  Snap Ads":
+    if not _snap_token:
+        st.warning("Snap Ads not configured — add SNAP_ACCESS_TOKEN to .env")
+        st.stop()
+    if not selected_snap_acct_id:
+        st.info("Select a Snap ad account in the sidebar.")
+        st.stop()
+
+    # ── Navigation state ──────────────────────────────────────────────────────
+    _sv  = st.session_state["snap_view"]
+    _ssc = st.session_state["snap_selected_campaign"]
+    _ssa = st.session_state["snap_selected_adset"]
+
+    # ── Breadcrumb ────────────────────────────────────────────────────────────
+    def _snap_bc_span(text: str, active: bool) -> str:
+        c = "#fff" if active else "rgba(255,255,255,0.35)"
+        w = "700"  if active else "400"
+        return f'<span style="color:{c};font-weight:{w}">{text}</span>'
+
+    if _sv == "campaigns":
+        _sbc = _snap_bc_span("Campaigns", True)
+    elif _sv == "adsets":
+        _sbc = _snap_bc_span("Campaigns", False) + ' <span style="color:rgba(255,255,255,0.2)">›</span> ' + \
+               _snap_bc_span(_ssc["name"] if _ssc else "", True)
+    else:
+        _sbc = _snap_bc_span("Campaigns", False) + ' <span style="color:rgba(255,255,255,0.2)">›</span> ' + \
+               _snap_bc_span(_ssc["name"] if _ssc else "", False) + \
+               ' <span style="color:rgba(255,255,255,0.2)">›</span> ' + \
+               _snap_bc_span(_ssa["name"] if _ssa else "", True)
+
+    st.markdown(
+        f'<div style="font-size:13px;margin-bottom:16px;padding:8px 14px;'
+        f'background:#0a0d14;border:1px solid rgba(255,255,255,0.06);border-radius:8px">'
+        f'{_sbc}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Snap Level 1 — Campaigns
+    # ══════════════════════════════════════════════════════════════════════════
+    if _sv == "campaigns":
+        with st.spinner(""):
+            _sdf_camp  = fetch_snap_campaigns(_snap_token, selected_snap_acct_id, start_str, end_str)
+            _sdf_daily = fetch_snap_daily(_snap_token, selected_snap_acct_id, start_str, end_str)
+
+        if _sdf_camp.empty:
+            st.info("No Snap campaign data for this date range.")
+        else:
+            _ss    = _sdf_camp["Cost"].sum()
+            _sc    = int(_sdf_camp["Clicks"].sum())
+            _si    = int(_sdf_camp["Impressions"].sum())
+            _scv   = _sdf_camp["Conversions"].sum()
+            _srv   = _sdf_camp["Conv. Value"].sum()
+            _svv   = int(_sdf_camp["Video Views"].sum()) if "Video Views" in _sdf_camp.columns else 0
+            _sctr  = (_sc / _si * 100) if _si else 0
+            _scpc  = (_ss / _sc) if _sc else 0
+            _scpa  = (_ss / _scv) if _scv else 0
+            _sroas = (_srv / _ss) if _ss else 0
+            _svvr  = (_svv / _si * 100) if _si else 0
+
+            st.markdown('<div class="sec-label">Snap Key Metrics</div>', unsafe_allow_html=True)
+            _sr_sub = "Excellent ✓" if _sroas >= 3 else "Good" if _sroas >= 1.5 else "Below target ⚠"
+            _scols  = st.columns(9)
+            _smetrics = [
+                ("💸", "Total Spend",   fmt_currency(_ss),                    f"{len(_sdf_camp)} campaigns", "#FFFC00"),
+                ("👁",  "Impressions",   fmt_number(_si),                      "Total ad views",              "#d2a8ff"),
+                ("👆",  "Swipes",        fmt_number(_sc),                      "Total swipes",                "#3fb950"),
+                ("📊", "Swipe Rate",    f"{_sctr:.2f}%",                      "Swipe-through rate",          "#39c5d0"),
+                ("⚡", "Cost/Swipe",    fmt_currency(_scpc),                  "Cost per swipe",              "#ffa657"),
+                ("🎯", "Conversions",   f"{_scv:,.1f}",                       "Purchases tracked",           "#ff6b9d"),
+                ("💰", "CPA",           fmt_currency(_scpa) if _scv else "—", "Cost per purchase",           "#e3b341"),
+                ("🎬", "Video Views",   fmt_number(_svv),                     f"VVR {_svvr:.1f}%",           "#a5d6ff"),
+                ("📈", "ROAS",          f"{_sroas:.2f}×",                     _sr_sub,                       "#3fb950" if _sroas >= 3 else "#f85149"),
+            ]
+            for _col, (_icon, _lbl, _val, _sub, _acc) in zip(_scols, _smetrics):
+                _col.markdown(kpi_card(_icon, _lbl, _val, _sub, _acc), unsafe_allow_html=True)
+
+            # ROAS hero
+            _src  = "#3fb950" if _sroas >= 3 else "#58a6ff" if _sroas >= 1.5 else "#f0883e" if _sroas >= 1 else "#f85149"
+            _srl  = "Excellent" if _sroas >= 3 else "Good" if _sroas >= 1.5 else "Break-even" if _sroas >= 1 else "Below target"
+            st.markdown(f"""
+            <div class="roas-wrap" style="background:linear-gradient(135deg,#1a1600,#0f1205);
+                 border:1px solid {hex_to_rgba(_src, 0.2)};">
+              <div>
+                <div style="font-size:10.5px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
+                            color:rgba(255,255,255,0.28);margin-bottom:6px">Snap ROAS</div>
+                <div style="font-size:58px;font-weight:900;color:{_src};line-height:1;
+                            letter-spacing:-2.5px;text-shadow:0 0 50px {hex_to_rgba(_src,0.5)}">
+                  {_sroas:.2f}<span style="font-size:28px;opacity:0.7">×</span>
+                </div>
+              </div>
+              <div class="roas-divider"></div>
+              <div>
+                <div class="roas-stat-label">Conv. Value</div>
+                <div class="roas-stat-value">{fmt_currency(_srv)}</div>
+              </div>
+              <div class="roas-divider"></div>
+              <div>
+                <div class="roas-stat-label">Total Spend</div>
+                <div class="roas-stat-value">{fmt_currency(_ss)}</div>
+              </div>
+              <div class="roas-divider"></div>
+              <div>
+                <div class="roas-stat-label">Status</div>
+                <div style="font-size:15px;font-weight:700;color:{_src}">{_srl}</div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Campaign intelligence
+            st.markdown('<div class="sec-label">Snap Campaign Intelligence</div>', unsafe_allow_html=True)
+            _sd_decisions = {i: ai_decision(row) for i, row in _sdf_camp.iterrows()}
+            _sn_s = sum(1 for d in _sd_decisions.values() if d["tier"] == "strong")
+            _sn_m = sum(1 for d in _sd_decisions.values() if d["tier"] == "moderate")
+            _sn_w = sum(1 for d in _sd_decisions.values() if d["tier"] == "weak")
+
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;
+                        padding:14px 20px;background:#0a0d14;border:1px solid rgba(255,255,255,0.05);
+                        border-radius:12px;margin-bottom:18px;font-size:12px">
+              <span style="color:rgba(255,255,255,0.3)">{len(_sdf_camp)} campaigns</span>
+              <span style="color:rgba(255,255,255,0.1)">|</span>
+              <span style="color:#3fb950;font-weight:600">🟢 {_sn_s} Scale</span>
+              <span style="color:#e3b341;font-weight:600">🟡 {_sn_m} Optimize</span>
+              <span style="color:#f85149;font-weight:600">🔴 {_sn_w} Pause/Fix</span>
+              <span style="margin-left:auto;font-size:11px;color:rgba(255,255,255,0.15)">
+                {start_str} → {end_str}
+              </span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            _sc1, _sc2, _sc3 = st.columns([2, 2, 1])
+            _s_sort   = _sc1.selectbox("Sort", ["Cost","Clicks","CTR","Impressions","Conversions"],
+                                       label_visibility="collapsed", key="snap_sort")
+            _s_filter = _sc2.selectbox("Filter", ["All","🟢 Scale","🟡 Optimize","🔴 Pause/Fix"],
+                                       label_visibility="collapsed", key="snap_filter")
+            _s_asc    = _sc3.selectbox("Dir", ["↓ Desc","↑ Asc"],
+                                       label_visibility="collapsed", key="snap_dir") == "↑ Asc"
+
+            _s_tier_map  = {"🟢 Scale": "strong", "🟡 Optimize": "moderate", "🔴 Pause/Fix": "weak"}
+            _sdf_sorted  = _sdf_camp.sort_values(_s_sort, ascending=_s_asc)
+            _s_any       = False
+            for _si2, _srow in _sdf_sorted.iterrows():
+                _sdec = _sd_decisions[_si2]
+                if _s_filter != "All" and _sdec["tier"] != _s_tier_map.get(_s_filter, ""):
+                    continue
+                _s_any = True
+                st.markdown(campaign_card(_srow, _sdec), unsafe_allow_html=True)
+                _sc_id   = str(_srow.get("Campaign ID", ""))
+                _sc_name = str(_srow.get("Campaign", ""))
+                if _sc_id and st.button("📊 View Ad Squads →", key=f"snap_adset_btn_{_si2}"):
+                    st.session_state["snap_view"]              = "adsets"
+                    st.session_state["snap_selected_campaign"] = {"id": _sc_id, "name": _sc_name}
+                    st.session_state["snap_selected_adset"]    = None
+                    st.rerun()
+
+            if not _s_any:
+                st.info("No campaigns match this filter.")
+
+            # Daily chart
+            if not _sdf_daily.empty:
+                st.markdown('<div class="sec-label">Snap Daily Performance</div>', unsafe_allow_html=True)
+                _sdf_plot = _sdf_daily.copy()
+                _sdf_plot["ROAS"] = _sdf_plot.apply(
+                    lambda r: round(r["Conv. Value"] / r["Cost"], 2) if r["Cost"] > 0 else 0.0, axis=1)
+                _sfig = go.Figure()
+                _sfig.add_trace(go.Scatter(
+                    x=_sdf_plot["Date"], y=_sdf_plot["Cost"], name="Spend",
+                    mode="lines", line=dict(color="#FFFC00", width=2.5, shape="spline"),
+                    fill="tozeroy",
+                    fillgradient=dict(type="vertical",
+                        colorscale=[[0,"rgba(255,252,0,0.22)"],[1,"rgba(255,252,0,0)"]]),
+                    hovertemplate="<b>Spend</b>: SAR %{y:,.2f}<extra></extra>",
+                ))
+                _sfig.add_trace(go.Scatter(
+                    x=_sdf_plot["Date"], y=_sdf_plot["Conv. Value"], name="Revenue",
+                    mode="lines", line=dict(color="#3fb950", width=2.5, shape="spline"),
+                    fill="tozeroy",
+                    fillgradient=dict(type="vertical",
+                        colorscale=[[0,"rgba(63,185,80,0.22)"],[1,"rgba(63,185,80,0)"]]),
+                    hovertemplate="<b>Revenue</b>: SAR %{y:,.2f}<extra></extra>",
+                ))
+                _sfig.add_trace(go.Scatter(
+                    x=_sdf_plot["Date"], y=_sdf_plot["ROAS"], name="ROAS",
+                    mode="lines", yaxis="y2",
+                    line=dict(color="#ffa657", width=2.5, shape="spline"),
+                    hovertemplate="<b>ROAS</b>: %{y:.2f}×<extra></extra>",
+                ))
+                _sl_max = max(_sdf_plot["Cost"].max(), _sdf_plot["Conv. Value"].max(), 1) * 1.35
+                _sr_max = max(_sdf_plot["ROAS"].max() * 1.4, 5.0)
+                _sfig.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0c1018",
+                    font=dict(family="Inter", color="rgba(255,255,255,0.3)", size=11),
+                    margin=dict(l=0, r=0, t=10, b=0), height=320,
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.035)", tickformat="%b %d"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.035)", tickprefix="SAR ",
+                               range=[0, _sl_max]),
+                    yaxis2=dict(overlaying="y", side="right", showgrid=False,
+                                ticksuffix="×", range=[0, _sr_max]),
+                    legend=dict(bgcolor="rgba(13,16,24,0.88)",
+                                bordercolor="rgba(255,255,255,0.07)", borderwidth=1,
+                                orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                    hovermode="x unified",
+                )
+                st.plotly_chart(_sfig, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Snap Level 2 — Ad Squads
+    # ══════════════════════════════════════════════════════════════════════════
+    elif _sv == "adsets":
+        if st.button("← Back to Campaigns", key="snap_back_to_camps"):
+            st.session_state["snap_view"]              = "campaigns"
+            st.session_state["snap_selected_campaign"] = None
+            st.rerun()
+
+        _snap_camp_id   = _ssc["id"]
+        _snap_camp_name = _ssc["name"]
+        st.markdown(f'<div class="sec-label">Ad Squads — {_snap_camp_name}</div>', unsafe_allow_html=True)
+
+        with st.spinner(""):
+            _sdf_adsets = fetch_snap_adsets(_snap_token, _snap_camp_id, start_str, end_str)
+
+        if _sdf_adsets.empty:
+            st.info(f"No ad squad data for '{_snap_camp_name}' in this date range.")
+        else:
+            _sas_s    = _sdf_adsets["Cost"].sum()
+            _sas_c    = int(_sdf_adsets["Clicks"].sum())
+            _sas_i    = int(_sdf_adsets["Impressions"].sum())
+            _sas_cv   = _sdf_adsets["Conversions"].sum()
+            _sas_rv   = _sdf_adsets["Conv. Value"].sum()
+            _sas_roas = round(_sas_rv / _sas_s, 2) if _sas_s else 0.0
+            _sas_ctr  = round(_sas_c / _sas_i * 100, 2) if _sas_i else 0.0
+
+            _sascols = st.columns(6)
+            for _col, (_lbl, _val) in zip(_sascols, [
+                ("Spend",       fmt_currency(_sas_s)),
+                ("Impressions", fmt_number(_sas_i)),
+                ("Swipes",      fmt_number(_sas_c)),
+                ("Swipe Rate",  f"{_sas_ctr:.2f}%"),
+                ("Conv.",       f"{_sas_cv:,.1f}"),
+                ("ROAS",        f"{_sas_roas:.2f}×"),
+            ]):
+                _col.metric(_lbl, _val)
+
+            _sas_decisions = {i: ai_decision(row) for i, row in _sdf_adsets.iterrows()}
+            for _sasi, _sasrow in _sdf_adsets.sort_values("Cost", ascending=False).iterrows():
+                _sasd    = _sas_decisions[_sasi]
+                st.markdown(campaign_card(_sasrow, _sasd), unsafe_allow_html=True)
+                _sas_id   = str(_sasrow.get("ID", ""))
+                _sas_name = str(_sasrow.get("Campaign", ""))
+                if _sas_id and st.button("📋 View Ads →", key=f"snap_ads_btn_{_sasi}"):
+                    st.session_state["snap_view"]           = "ads"
+                    st.session_state["snap_selected_adset"] = {"id": _sas_id, "name": _sas_name}
+                    st.rerun()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Snap Level 3 — Ads
+    # ══════════════════════════════════════════════════════════════════════════
+    elif _sv == "ads":
+        if st.button("← Back to Ad Squads", key="snap_back_to_adsets"):
+            st.session_state["snap_view"]           = "adsets"
+            st.session_state["snap_selected_adset"] = None
+            st.rerun()
+
+        _snap_adset_id   = _ssa["id"]
+        _snap_adset_name = _ssa["name"]
+        st.markdown(f'<div class="sec-label">Ads — {_snap_adset_name}</div>', unsafe_allow_html=True)
+
+        with st.spinner(""):
+            _sdf_ads = fetch_snap_ads(_snap_token, _snap_adset_id, start_str, end_str)
+
+        if _sdf_ads.empty:
+            st.info(f"No ad data for '{_snap_adset_name}' in this date range.")
+        else:
+            for _, _sadrow in _sdf_ads.sort_values("Cost", ascending=False).iterrows():
+                _sad = ai_decision(_sadrow)
+                st.markdown(campaign_card(_sadrow, _sad), unsafe_allow_html=True)
 
     st.stop()
 

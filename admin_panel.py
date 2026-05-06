@@ -49,13 +49,16 @@ def _edit_dialog(client: dict) -> None:
     )
 
     new_name = st.text_input("Display Name", value=client.get("display_name", ""))
-    c_g, c_m = st.columns(2)
+    c_g, c_m, c_s = st.columns(3)
     new_cid  = c_g.text_input("Google Ads Account ID",
                                value=client.get("client_id", ""),
                                help="10-digit ID, no dashes")
     new_meta = c_m.text_input("Meta Ad Account ID",
                                value=client.get("meta_account_id", ""),
                                help="Numeric ID only, e.g. 579554746963968")
+    new_snap = c_s.text_input("Snap Ad Account ID",
+                               value=client.get("snap_account_id", ""),
+                               help="UUID from Snap Ads Manager")
     new_pass = st.text_input("New Password", type="password",
                               placeholder="Leave blank to keep current password")
     active   = st.toggle("Account Active", value=client.get("active", True))
@@ -73,6 +76,7 @@ def _edit_dialog(client: dict) -> None:
                 clients[i]["display_name"]   = new_name.strip()
                 clients[i]["client_id"]      = new_cid.strip().replace("-", "")
                 clients[i]["meta_account_id"]= new_meta.strip().replace("act_", "")
+                clients[i]["snap_account_id"]= new_snap.strip()
                 clients[i]["active"]         = active
                 if new_pass.strip():
                     clients[i]["password_hash"] = _hash(new_pass.strip())
@@ -100,10 +104,15 @@ def _tab_add() -> None:
         password  = c3.text_input("Password *", type="password")
         client_id = c4.text_input("Google Ads Account ID *",
                                    placeholder="1234567890  (no dashes)")
-        meta_account_id = st.text_input(
+        c5, c6 = st.columns(2)
+        meta_account_id = c5.text_input(
             "Meta Ad Account ID",
-            placeholder="579554746963968  (optional, numeric only)",
+            placeholder="579554746963968  (optional)",
             help="Leave blank if client has no Meta Ads account")
+        snap_account_id = c6.text_input(
+            "Snap Ad Account ID",
+            placeholder="UUID from Snap Ads Manager  (optional)",
+            help="Leave blank if client has no Snap Ads account")
 
         st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
         submitted = st.form_submit_button(
@@ -133,6 +142,7 @@ def _tab_add() -> None:
                     "display_name":    display_name.strip(),
                     "client_id":       client_id.strip().replace("-", ""),
                     "meta_account_id": meta_account_id.strip().replace("act_", ""),
+                    "snap_account_id": snap_account_id.strip(),
                     "active":          True,
                     "created_at":      datetime.utcnow().isoformat(),
                 })
