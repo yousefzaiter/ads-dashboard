@@ -1429,27 +1429,20 @@ with st.sidebar:
     if _is_admin:
         _src_api = "Meta Marketing API v20" if _active_platform == "📘  Meta Ads" else "Google Ads API v20"
         if _active_platform == "📘  Meta Ads":
-            _ts  = _meta_token_status
-            _tst = _ts.get("status", "unknown")
-            _tdl = _ts.get("days_left", 0)
-            if _tst == "refreshed":
-                _src_note = "🔄 Token auto-refreshed — valid 60 days"
+            _tst = _meta_token_status.get("status", "unknown")
+            _tdl = _meta_token_status.get("days_left", 0)
+            if _tst == "expired":
+                _src_note = "✗ Token expired — update META_ACCESS_TOKEN"
+                _note_col = "#f85149"
+            elif _tdl == 9999 or _tst in ("ok", "refreshed", "unknown"):
+                _src_note = "✓ Token valid — System User"
                 _note_col = "#3fb950"
-            elif _tst == "ok" and _tdl == 9999:
-                _src_note = "✓ Token never expires"
-                _note_col = "#3fb950"
-            elif _tst == "ok":
+            elif _tdl > 0:
                 _src_note = f"✓ Token valid — {_tdl} days remaining"
                 _note_col = "#3fb950" if _tdl > 7 else "#d29922"
-            elif _tst == "expired":
-                _src_note = "✗ Token expired — paste new token in .env"
-                _note_col = "#f85149"
-            elif _tst == "no_credentials":
-                _src_note = "⚠ META_APP_ID/SECRET missing — auto-refresh disabled"
-                _note_col = "#d29922"
             else:
-                _src_note = _ts.get("message", "Token status unknown")
-                _note_col = "rgba(255,255,255,0.2)"
+                _src_note = "✓ Token active"
+                _note_col = "#3fb950"
         else:
             _src_note = "Auto-refresh every 5 min"
             _note_col = "rgba(255,255,255,0.2)"

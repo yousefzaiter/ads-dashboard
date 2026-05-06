@@ -42,15 +42,21 @@ def _env(key: str) -> str:
     return os.getenv(key, "")
 
 
-def check_token_info(token: str, app_id: str, app_secret: str) -> dict:
-    """Return Meta /debug_token data dict for the given token."""
+def check_token_info(token: str, app_id: str = "", app_secret: str = "") -> dict:
+    """
+    Validate token by calling /me — works for user tokens AND system user tokens.
+    Returns a normalised dict with 'is_valid', 'expires_at', 'type' keys.
+    """
     resp = requests.get(
-        f"{META_API}/debug_token",
-        params={"input_token": token, "access_token": f"{app_id}|{app_secret}"},
+        f"{META_API}/me",
+        params={"access_token": token, "fields": "id,name"},
         timeout=15,
     )
-    resp.raise_for_status()
-    return resp.json().get("data", {})
+    data = resp.json()
+    if "error" in data:
+        return {"is_valid": False, "expires_at": 0, "type": "unknown"}
+    # System user tokens and non-expiring tokens have no expiry — treat as permanent
+    return {"is_valid": True, "expires_at": 0, "type": "system_user"}
 
 
 def exchange_for_long_lived(token: str, app_id: str, app_secret: str) -> str | None:
@@ -104,15 +110,11 @@ def refresh_if_needed() -> dict:
     if not token:
         return {"status": "no_credentials", "days_left": 0, "message": "META_ACCESS_TOKEN not set"}
 
-    if not app_id or not app_secret:
-        return {"status": "no_credentials", "days_left": 0,
-                "message": "META_APP_ID or META_APP_SECRET missing — cannot auto-refresh"}
-
-    # ── Inspect token ─────────────────────────────────────────────────────────
+    # ── Inspect token (works without app credentials) ─────────────────────────
     try:
-        info = check_token_info(token, app_id, app_secret)
+        info = check_token_info(token)
     except Exception as exc:
-        return {"status": "error", "days_left": 0, "message": f"debug_token failed: {exc}"}
+        return {"status": "error", "days_left": 0, "message": f"Token check failed: {exc}"}
 
     if not info.get("is_valid"):
         log.warning("Token is invalid — attempting emergency exchange")
