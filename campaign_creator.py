@@ -8,10 +8,9 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
 
 _api_key = os.getenv("ANTHROPIC_API_KEY", "")
-print(f"[DEBUG] API Key loaded: {_api_key[:20] if _api_key else 'NOT FOUND'}")
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
