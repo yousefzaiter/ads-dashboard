@@ -1864,14 +1864,16 @@ if _page == "🗂️  Projects":
     from projects_page import render_projects_page
 
     def _google_fetch_for_projects(customer_id: str, start: str, end: str):
-        # token / dev_token / mcc_id are the live OAuth credentials obtained above
-        # via get_access_token() — do NOT use GOOGLE_ADS_REFRESH_TOKEN here
         return fetch_campaign_data(customer_id, token, dev_token, start, end, mcc_id)
+
+    def _google_daily_for_projects(customer_id: str, start: str, end: str):
+        return fetch_daily_data(customer_id, token, dev_token, start, end, mcc_id)
 
     render_projects_page(
         start=start_date.strftime("%Y-%m-%d"),
         end=end_date.strftime("%Y-%m-%d"),
         fetch_google=_google_fetch_for_projects,
+        fetch_google_daily=_google_daily_for_projects,
     )
     st.stop()
 

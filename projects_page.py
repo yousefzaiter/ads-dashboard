@@ -3,7 +3,8 @@ import os
 import uuid
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
 
 _CLIENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clients.json")
 
@@ -44,22 +45,7 @@ def save_projects(projects: list[dict]) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
-
-def _platform_dots(platforms: dict) -> str:
-    dots = []
-    for key, color in _PLATFORM_COLORS.items():
-        acct = (platforms or {}).get(key, {})
-        ids = list(acct.values()) if isinstance(acct, dict) else []
-        active = any(str(v).strip() for v in ids)
-        opacity = "1" if active else "0.18"
-        dots.append(
-            f"<span style='display:inline-block;width:9px;height:9px;"
-            f"border-radius:50%;background:{color};opacity:{opacity};"
-            f"margin-right:4px'></span>"
-        )
-    return "".join(dots)
-
+# ── format helpers ────────────────────────────────────────────────────────────
 
 def _fmt_sar(v: float) -> str:
     if v == 0:
@@ -87,8 +73,42 @@ def _fmt_pct(v: float) -> str:
     return f"{v:.2f}%"
 
 
+def _fmt_x(v: float) -> str:
+    if v == 0:
+        return "—"
+    return f"{v:.2f}×"
+
+
+def _platform_dots(platforms: dict) -> str:
+    dots = []
+    for key, color in _PLATFORM_COLORS.items():
+        acct = (platforms or {}).get(key, {})
+        ids  = list(acct.values()) if isinstance(acct, dict) else []
+        active = any(str(v).strip() for v in ids)
+        opacity = "1" if active else "0.18"
+        dots.append(
+            f"<span style='display:inline-block;width:9px;height:9px;"
+            f"border-radius:50%;background:{color};opacity:{opacity};"
+            f"margin-right:4px'></span>"
+        )
+    return "".join(dots)
+
+
+def _delta_badge(curr: float, prev: float, higher_is_better: bool = True) -> str:
+    """Inline ▲/▼ % badge HTML."""
+    if not prev or not curr:
+        return ""
+    pct = (curr - prev) / abs(prev) * 100
+    if abs(pct) < 0.05:
+        return "<span style='font-size:11px;color:rgba(255,255,255,0.3)'>±0%</span>"
+    up      = pct > 0
+    is_good = up if higher_is_better else not up
+    color   = "#3fb950" if is_good else "#f85149"
+    arrow   = "▲" if up else "▼"
+    return f"<span style='font-size:11px;font-weight:500;color:{color}'>{arrow}&thinsp;{abs(pct):.1f}%</span>"
+
+
 def _roas_ind_color(roas: float, target_mer: float) -> str:
-    """Returns the hex/rgba color for the ROAS status indicator dot."""
     if target_mer <= 0:
         return "rgba(255,255,255,0.2)"
     if roas >= target_mer:
@@ -96,6 +116,39 @@ def _roas_ind_color(roas: float, target_mer: float) -> str:
     if roas >= target_mer * 0.8:
         return "#e3b341"
     return "#f85149"
+
+
+def _roas_color(roas: float, target_mer: float) -> str:
+    if target_mer <= 0:
+        return "#f0f6fc"
+    if roas >= target_mer:
+        return "#3fb950"
+    if roas >= target_mer * 0.8:
+        return "#e3b341"
+    return "#f85149"
+
+
+# ── KPI card helper ───────────────────────────────────────────────────────────
+
+_KS  = ("background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);"
+        "border-radius:10px;padding:14px 16px;min-height:80px")
+_LBL = "font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px"
+_VAL = "font-size:20px;font-weight:800;margin-top:4px;line-height:1.2"
+_SUB = "font-size:10px;color:rgba(255,255,255,0.3);margin-top:2px"
+
+
+def _kpi_card(col, label: str, value: str, badge: str = "",
+              color: str = "#f0f6fc", sub: str = "") -> None:
+    sub_html  = f"<div style='{_SUB}'>{sub}</div>" if sub else ""
+    badge_html = f"<div style='margin-top:5px'>{badge}</div>" if badge else ""
+    col.markdown(
+        f"<div style='{_KS}'>"
+        f"<div style='{_LBL}'>{label}</div>"
+        f"<div style='{_VAL};color:{color}'>{value}</div>"
+        f"{badge_html}{sub_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ── new-project dialog ────────────────────────────────────────────────────────
@@ -208,22 +261,18 @@ def _edit_project_dialog(proj: dict):
             st.rerun()
 
 
-# ── cross-platform data fetcher ───────────────────────────────────────────────
+# ── data fetchers ─────────────────────────────────────────────────────────────
 
 def _fetch_platform_df(platform: str, proj: dict, start: str, end: str,
                        fetch_google=None) -> tuple[pd.DataFrame, str | None]:
-    """Returns (df, error_message). df is empty on error/skip; error is None on success."""
     plat = proj.get("platforms", {}).get(platform, {})
 
     if platform == "google":
         cid = plat.get("customer_id", "").strip()
-        if not cid:
+        if not cid or fetch_google is None:
             return pd.DataFrame(), None
-        if fetch_google is None:
-            return pd.DataFrame(), "fetch_google not provided"
         try:
-            df = fetch_google(cid, start, end)
-            return df, None
+            return fetch_google(cid, start, end), None
         except Exception as e:
             return pd.DataFrame(), str(e)[:80]
 
@@ -237,15 +286,12 @@ def _fetch_platform_df(platform: str, proj: dict, start: str, end: str,
             token = os.getenv("META_ACCESS_TOKEN", "")
             if not token:
                 return pd.DataFrame(), "No META_ACCESS_TOKEN in .env"
-            # quick validity check before making the campaigns call
-            info = check_token_info(token)
-            if not info.get("is_valid"):
-                return pd.DataFrame(), "Token expired — generate a new token at developers.facebook.com/tools/explorer and update META_ACCESS_TOKEN in .env"
-            df = fetch_meta_campaigns(token, acct, start, end)
-            return df, None
+            if not check_token_info(token).get("is_valid"):
+                return pd.DataFrame(), "Token expired — update META_ACCESS_TOKEN in .env"
+            return fetch_meta_campaigns(token, acct, start, end), None
         except Exception as e:
             err = str(e)
-            if "Session has expired" in err or "OAuthException" in err or "190" in err:
+            if "Session has expired" in err or "190" in err:
                 return pd.DataFrame(), "Token expired — update META_ACCESS_TOKEN in .env"
             return pd.DataFrame(), err[:120]
 
@@ -258,8 +304,7 @@ def _fetch_platform_df(platform: str, proj: dict, start: str, end: str,
             token = os.getenv("SNAP_ACCESS_TOKEN", "")
             if not token:
                 return pd.DataFrame(), "No SNAP_ACCESS_TOKEN"
-            df = fetch_snap_campaigns(token, acct, start, end)
-            return df, None
+            return fetch_snap_campaigns(token, acct, start, end), None
         except Exception as e:
             return pd.DataFrame(), str(e)[:80]
 
@@ -272,136 +317,358 @@ def _fetch_platform_df(platform: str, proj: dict, start: str, end: str,
             return pd.DataFrame(), "Credentials pending"
         try:
             from tiktok_ads_server import fetch_tiktok_campaigns
-            df = fetch_tiktok_campaigns(token, adv, start, end, show_paused=False)
-            return df, None
+            return fetch_tiktok_campaigns(token, adv, start, end, show_paused=False), None
         except Exception as e:
             return pd.DataFrame(), str(e)[:80]
 
     return pd.DataFrame(), None
 
 
+def _fetch_daily_df(platform: str, proj: dict, start: str, end: str,
+                    fetch_google_daily=None) -> pd.DataFrame:
+    """Returns daily DataFrame with Date,Impressions,Clicks,Cost,Conversions,Conv. Value."""
+    plat = proj.get("platforms", {}).get(platform, {})
+
+    if platform == "google":
+        cid = plat.get("customer_id", "").strip()
+        if not cid or fetch_google_daily is None:
+            return pd.DataFrame()
+        try:
+            return fetch_google_daily(cid, start, end)
+        except Exception:
+            return pd.DataFrame()
+
+    if platform == "meta":
+        acct = plat.get("ad_account_id", "").strip()
+        if not acct:
+            return pd.DataFrame()
+        try:
+            from meta_ads_server import fetch_meta_daily
+            token = os.getenv("META_ACCESS_TOKEN", "")
+            if not token:
+                return pd.DataFrame()
+            return fetch_meta_daily(token, acct, start, end)
+        except Exception:
+            return pd.DataFrame()
+
+    if platform == "snap":
+        acct = plat.get("ad_account_id", "").strip()
+        if not acct:
+            return pd.DataFrame()
+        try:
+            from snap_ads_server import fetch_snap_daily
+            token = os.getenv("SNAP_ACCESS_TOKEN", "")
+            if not token:
+                return pd.DataFrame()
+            return fetch_snap_daily(token, acct, start, end)
+        except Exception:
+            return pd.DataFrame()
+
+    return pd.DataFrame()
+
+
 def _summarise(df: pd.DataFrame) -> dict:
-    """Aggregate a campaigns DataFrame to a single-row summary dict."""
     if df.empty:
         return {}
-    spend       = float(df["Cost"].sum())          if "Cost" in df.columns        else 0.0
-    revenue     = float(df["Conv. Value"].sum())   if "Conv. Value" in df.columns else 0.0
-    conversions = float(df["Conversions"].sum())   if "Conversions" in df.columns else 0.0
-    impressions = float(df["Impressions"].sum())   if "Impressions" in df.columns else 0.0
-    clicks      = float(df["Clicks"].sum())        if "Clicks" in df.columns      else 0.0
-    roas   = revenue / spend       if spend else 0.0
-    cpa    = spend / conversions   if conversions else 0.0
-    ctr    = clicks / impressions * 100 if impressions else 0.0
-    cpm    = spend / impressions * 1000 if impressions else 0.0
+    spend       = float(df["Cost"].sum())         if "Cost" in df.columns        else 0.0
+    revenue     = float(df["Conv. Value"].sum())  if "Conv. Value" in df.columns else 0.0
+    conversions = float(df["Conversions"].sum())  if "Conversions" in df.columns else 0.0
+    impressions = float(df["Impressions"].sum())  if "Impressions" in df.columns else 0.0
+    clicks      = float(df["Clicks"].sum())       if "Clicks" in df.columns      else 0.0
     return {
-        "spend": spend, "revenue": revenue, "conversions": conversions,
-        "impressions": impressions, "clicks": clicks,
-        "roas": roas, "cpa": cpa, "ctr": ctr, "cpm": cpm,
+        "spend":       spend,
+        "revenue":     revenue,
+        "conversions": conversions,
+        "impressions": impressions,
+        "clicks":      clicks,
+        "roas":  revenue / spend       if spend       else 0.0,
+        "cpa":   spend / conversions   if conversions else 0.0,
+        "ctr":   clicks / impressions * 100  if impressions else 0.0,
+        "cpm":   spend  / impressions * 1000 if impressions else 0.0,
+        "aov":   revenue / conversions if conversions else 0.0,
+        "cvr":   conversions / clicks * 100 if clicks else 0.0,
+        "mer":   revenue / spend       if spend       else 0.0,
     }
 
 
-# ── project detail view ───────────────────────────────────────────────────────
+def _agg_totals(results: dict) -> dict:
+    spend  = sum(r["s"].get("spend", 0)       for r in results.values())
+    rev    = sum(r["s"].get("revenue", 0)     for r in results.values())
+    orders = sum(r["s"].get("conversions", 0) for r in results.values())
+    impr   = sum(r["s"].get("impressions", 0) for r in results.values())
+    clicks = sum(r["s"].get("clicks", 0)      for r in results.values())
+    return {
+        "spend":  spend, "revenue": rev, "orders": orders,
+        "impr":   impr,  "clicks":  clicks,
+        "roas":   rev   / spend  if spend  else 0.0,
+        "cpa":    spend / orders if orders else 0.0,
+        "ctr":    clicks / impr  * 100  if impr   else 0.0,
+        "aov":    rev   / orders if orders else 0.0,
+        "cvr":    orders / clicks * 100 if clicks else 0.0,
+        "mer":    rev   / spend  if spend  else 0.0,
+    }
 
-def _render_project_detail(proj: dict, start: str, end: str, fetch_google=None):
-    back_col, edit_col, _ = st.columns([2, 2, 6])
-    with back_col:
-        if st.button("← Back", key="proj_back"):
-            st.session_state.pop("selected_project_id", None)
-            st.rerun()
-    with edit_col:
-        if st.button("✏️  Edit", key="proj_edit"):
-            _edit_project_dialog(proj)
 
-    plat_cfg   = proj.get("platforms", {})
-    target_cpa = float(proj.get("target_cpa", 0))
-    target_mer = float(proj.get("target_mer", 0))
+def _aggregate_daily(results: dict) -> pd.DataFrame:
+    dfs = [r["daily"] for r in results.values() if not r["daily"].empty]
+    if not dfs:
+        return pd.DataFrame()
+    combined = pd.concat(dfs, ignore_index=True)
+    agg = (combined.groupby("Date")
+           .agg(Spend=("Cost", "sum"), Revenue=("Conv. Value", "sum"),
+                Orders=("Conversions", "sum"), Impressions=("Impressions", "sum"),
+                Clicks=("Clicks", "sum"))
+           .reset_index()
+           .sort_values("Date"))
+    agg["ROAS"] = agg.apply(lambda r: r.Revenue / r.Spend    if r.Spend   else 0.0, axis=1)
+    agg["CPA"]  = agg.apply(lambda r: r.Spend   / r.Orders   if r.Orders  else 0.0, axis=1)
+    agg["CTR"]  = agg.apply(lambda r: r.Clicks  / r.Impressions * 100 if r.Impressions else 0.0, axis=1)
+    agg["AOV"]  = agg.apply(lambda r: r.Revenue / r.Orders   if r.Orders  else 0.0, axis=1)
+    # day-over-day deltas (sort ascending, shift, then reverse for display)
+    agg["ROAS_prev"] = agg["ROAS"].shift(1)
+    agg["CPA_prev"]  = agg["CPA"].shift(1)
+    agg = agg.sort_values("Date", ascending=False).reset_index(drop=True)
+    return agg
 
+
+# ── section renderers ─────────────────────────────────────────────────────────
+
+def _section_label(text: str) -> None:
     st.markdown(
-        f"<div style='margin:8px 0 20px'>"
-        f"<div style='font-size:28px;font-weight:900;color:#f0f6fc;letter-spacing:-1px'>{proj['name']}</div>"
-        f"<div style='font-size:12px;color:rgba(255,255,255,0.35);margin-top:6px'>"
-        f"{_platform_dots(plat_cfg)} &nbsp;Cross-platform &middot; {start} &rarr; {end}"
-        f"</div></div>",
+        f"<div style='font-size:11px;font-weight:600;color:rgba(255,255,255,0.3);"
+        f"text-transform:uppercase;letter-spacing:1.2px;margin:22px 0 10px'>{text}</div>",
         unsafe_allow_html=True,
     )
 
-    # ── fetch data for each connected platform ─────────────────────────────
-    platform_results: dict[str, dict] = {}
 
-    for plat in ["google", "meta", "snap", "tiktok"]:
-        acct = plat_cfg.get(plat, {})
-        ids  = list(acct.values()) if isinstance(acct, dict) else []
-        if not any(str(v).strip() for v in ids):
-            continue
-        with st.spinner(f"Loading {_PLATFORM_LABELS[plat]}…"):
-            df, err = _fetch_platform_df(plat, proj, start, end, fetch_google=fetch_google)
-        platform_results[plat] = {"s": _summarise(df), "err": err, "empty": df.empty}
+def _render_top_cards(curr: dict, prev: dict) -> None:
+    """3 wide cards: Spend, Revenue, MER."""
+    c1, c2, c3 = st.columns(3, gap="small")
+    mer_c = "#f0f6fc" if not curr["mer"] else "#f0f6fc"
 
-    if not platform_results:
-        st.info("No connected platforms with data for this date range.")
+    _kpi_card(c1, "Total Spend",
+              _fmt_sar(curr["spend"]),
+              _delta_badge(curr["spend"], prev.get("spend", 0), higher_is_better=False))
+    _kpi_card(c2, "Total Revenue",
+              _fmt_sar(curr["revenue"]),
+              _delta_badge(curr["revenue"], prev.get("revenue", 0)))
+    _kpi_card(c3, "MER  (Revenue / Spend)",
+              _fmt_x(curr["mer"]),
+              _delta_badge(curr["mer"], prev.get("mer", 0)),
+              color=mer_c)
+
+
+def _render_metric_grid(curr: dict, prev: dict, target_mer: float, target_cpa: float) -> None:
+    """8 cards in 2 rows of 4."""
+    r1 = st.columns(4, gap="small")
+    r2 = st.columns(4, gap="small")
+
+    roas_c = _roas_color(curr["roas"], target_mer)
+    cpa_c  = ("#3fb950" if (target_cpa and curr["cpa"] <= target_cpa)
+              else "#f85149" if target_cpa else "#f0f6fc")
+
+    # row 1
+    _kpi_card(r1[0], "ROAS",
+              _fmt_x(curr["roas"]),
+              _delta_badge(curr["roas"], prev.get("roas", 0)),
+              color=roas_c,
+              sub=f"Target {target_mer:.1f}×" if target_mer else "")
+    _kpi_card(r1[1], "Total Orders",
+              _fmt_num(curr["orders"]),
+              _delta_badge(curr["orders"], prev.get("orders", 0)))
+    _kpi_card(r1[2], "Total Revenue",
+              _fmt_sar(curr["revenue"]),
+              _delta_badge(curr["revenue"], prev.get("revenue", 0)))
+    _kpi_card(r1[3], "Total Spend",
+              _fmt_sar(curr["spend"]),
+              _delta_badge(curr["spend"], prev.get("spend", 0), higher_is_better=False))
+
+    # row 2
+    _kpi_card(r2[0], "CTR",
+              _fmt_pct(curr["ctr"]),
+              _delta_badge(curr["ctr"], prev.get("ctr", 0)))
+    _kpi_card(r2[1], "CVR  (Orders / Clicks)",
+              _fmt_pct(curr["cvr"]),
+              _delta_badge(curr["cvr"], prev.get("cvr", 0)))
+    _kpi_card(r2[2], "AOV  (Revenue / Order)",
+              _fmt_sar(curr["aov"]),
+              _delta_badge(curr["aov"], prev.get("aov", 0)))
+    _kpi_card(r2[3], "CPA",
+              _fmt_sar(curr["cpa"]),
+              _delta_badge(curr["cpa"], prev.get("cpa", 0), higher_is_better=False),
+              color=cpa_c,
+              sub=f"Target {_fmt_sar(target_cpa)}" if target_cpa else "")
+
+
+def _render_daily_chart(daily: pd.DataFrame) -> None:
+    if daily.empty:
+        st.info("No daily data available for chart.")
         return
 
-    # ── aggregate totals ───────────────────────────────────────────────────
-    def _sum(field: str) -> float:
-        return sum(r["s"].get(field, 0) for r in platform_results.values())
+    lines = st.multiselect(
+        "Show lines",
+        ["Spend", "Revenue", "Orders"],
+        default=["Spend", "Revenue", "Orders"],
+        key="proj_chart_lines",
+        label_visibility="collapsed",
+    )
 
-    total_spend  = _sum("spend")
-    total_rev    = _sum("revenue")
-    total_orders = _sum("conversions")
-    total_impr   = _sum("impressions")
-    total_clicks = _sum("clicks")
-    agg_roas = total_rev   / total_spend  if total_spend  else 0.0
-    agg_cpa  = total_spend / total_orders if total_orders else 0.0
-    agg_ctr  = total_clicks / total_impr * 100  if total_impr else 0.0
-    agg_cpm  = total_spend  / total_impr * 1000 if total_impr else 0.0
+    fig = go.Figure()
+    line_cfg = {
+        "Spend":   {"col": "Spend",   "color": "#58a6ff", "yaxis": "y"},
+        "Revenue": {"col": "Revenue", "color": "#3fb950", "yaxis": "y"},
+        "Orders":  {"col": "Orders",  "color": "#e3b341", "yaxis": "y2"},
+    }
 
-    # ── KPI summary row ────────────────────────────────────────────────────
-    cpa_color = ("#3fb950" if (target_cpa and agg_cpa <= target_cpa)
-                 else "#f85149" if target_cpa else "#58a6ff")
-    mer_color = ("#3fb950" if (target_mer and agg_roas >= target_mer)
-                 else "#f85149" if target_mer else "#58a6ff")
+    has_orders = "Orders" in lines
+    for name in lines:
+        cfg = line_cfg[name]
+        fig.add_trace(go.Scatter(
+            x=daily["Date"], y=daily[cfg["col"]],
+            name=name, mode="lines+markers",
+            line=dict(color=cfg["color"], width=2),
+            marker=dict(size=4),
+            yaxis=cfg["yaxis"],
+        ))
 
-    k1, k2, k3, k4, k5 = st.columns(5)
-    _ks = "background:rgba(255,255,255,0.04);border-radius:10px;padding:14px 16px;min-height:72px"
-    _lbl = "font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px"
-    _val = "font-size:22px;font-weight:800;margin-top:4px"
-    _sub = "font-size:10px;color:rgba(255,255,255,0.3);margin-top:2px"
+    layout = dict(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=0, t=10, b=0),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    font=dict(color="rgba(255,255,255,0.6)", size=11)),
+        xaxis=dict(showgrid=False, tickfont=dict(color="rgba(255,255,255,0.4)", size=10),
+                   linecolor="rgba(255,255,255,0.08)"),
+        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
+                   tickfont=dict(color="rgba(255,255,255,0.4)", size=10),
+                   linecolor="rgba(255,255,255,0.08)",
+                   title=dict(text="SAR", font=dict(color="rgba(255,255,255,0.3)", size=10))),
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="#1c2128", bordercolor="rgba(255,255,255,0.1)",
+                        font=dict(color="#f0f6fc", size=12)),
+    )
+    if has_orders:
+        layout["yaxis2"] = dict(
+            overlaying="y", side="right", showgrid=False,
+            tickfont=dict(color="#e3b341", size=10),
+            title=dict(text="Orders", font=dict(color="#e3b341", size=10)),
+        )
 
-    with k1:
-        st.markdown(
-            f"<div style='{_ks}'><div style='{_lbl}'>Total Spend</div>"
-            f"<div style='{_val};color:#f0f6fc'>{_fmt_sar(total_spend)}</div></div>",
-            unsafe_allow_html=True)
-    with k2:
-        st.markdown(
-            f"<div style='{_ks}'><div style='{_lbl}'>Revenue</div>"
-            f"<div style='{_val};color:#f0f6fc'>{_fmt_sar(total_rev)}</div></div>",
-            unsafe_allow_html=True)
-    with k3:
-        tgt_line = f"<div style='{_sub}'>Target {target_mer:.1f}&times;</div>" if target_mer else ""
-        st.markdown(
-            f"<div style='{_ks}'><div style='{_lbl}'>Overall ROAS</div>"
-            f"<div style='{_val};color:{mer_color}'>{agg_roas:.2f}&times;</div>{tgt_line}</div>",
-            unsafe_allow_html=True)
-    with k4:
-        tgt_line = f"<div style='{_sub}'>Target {_fmt_sar(target_cpa)}</div>" if target_cpa else ""
-        st.markdown(
-            f"<div style='{_ks}'><div style='{_lbl}'>Overall CPA</div>"
-            f"<div style='{_val};color:{cpa_color}'>{_fmt_sar(agg_cpa)}</div>{tgt_line}</div>",
-            unsafe_allow_html=True)
-    with k5:
-        st.markdown(
-            f"<div style='{_ks}'><div style='{_lbl}'>Total Orders</div>"
-            f"<div style='{_val};color:#f0f6fc'>{_fmt_num(total_orders)}</div></div>",
-            unsafe_allow_html=True)
+    fig.update_layout(**layout)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    # ── platform breakdown table — rendered via st.html() ─────────────────
-    # st.markdown strips complex inline styles in Streamlit ≥1.31; st.html()
-    # renders the content as-is inside an auto-sized sandboxed element.
+def _render_daily_table(daily: pd.DataFrame) -> None:
+    if daily.empty:
+        st.info("No daily data.")
+        return
+
+    # Best / worst summary
+    valid_roas = daily[daily["ROAS"] > 0]
+    valid_cpa  = daily[daily["CPA"] > 0]
+
+    if not valid_roas.empty and not valid_cpa.empty:
+        best_roas_row = valid_roas.loc[valid_roas["ROAS"].idxmax()]
+        worst_cpa_row = valid_cpa.loc[valid_cpa["CPA"].idxmax()]
+        best_dt  = best_roas_row["Date"].strftime("%b %d")
+        worst_dt = worst_cpa_row["Date"].strftime("%b %d")
+
+        bc, wc, _ = st.columns([2, 2, 6])
+        bc.markdown(
+            f"<div style='background:rgba(63,185,80,0.1);border:1px solid rgba(63,185,80,0.25);"
+            f"border-radius:8px;padding:10px 14px'>"
+            f"<div style='font-size:10px;color:#3fb950;text-transform:uppercase;letter-spacing:1px'>Best ROAS Day</div>"
+            f"<div style='font-size:15px;font-weight:700;color:#f0f6fc;margin-top:3px'>{best_dt}</div>"
+            f"<div style='font-size:12px;color:rgba(255,255,255,0.5);margin-top:1px'>"
+            f"ROAS {best_roas_row['ROAS']:.2f}× · {_fmt_sar(best_roas_row['Spend'])}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        wc.markdown(
+            f"<div style='background:rgba(248,81,73,0.1);border:1px solid rgba(248,81,73,0.25);"
+            f"border-radius:8px;padding:10px 14px'>"
+            f"<div style='font-size:10px;color:#f85149;text-transform:uppercase;letter-spacing:1px'>Worst CPA Day</div>"
+            f"<div style='font-size:15px;font-weight:700;color:#f0f6fc;margin-top:3px'>{worst_dt}</div>"
+            f"<div style='font-size:12px;color:rgba(255,255,255,0.5);margin-top:1px'>"
+            f"CPA {_fmt_sar(worst_cpa_row['CPA'])} · {_fmt_sar(worst_cpa_row['Spend'])}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+    best_roas_date  = valid_roas["ROAS"].idxmax() if not valid_roas.empty else None
+    worst_cpa_date  = valid_cpa["CPA"].idxmax()   if not valid_cpa.empty  else None
+
+    def _day_delta(curr_v: float, prev_v: float, higher_is_better: bool) -> str:
+        if not prev_v or not curr_v:
+            return ""
+        pct = (curr_v - prev_v) / abs(prev_v) * 100
+        if abs(pct) < 0.05:
+            return ""
+        up      = pct > 0
+        is_good = up if higher_is_better else not up
+        color   = "#3fb950" if is_good else "#f85149"
+        arrow   = "▲" if up else "▼"
+        return f"<span style='color:{color};font-size:10px'>{arrow}{abs(pct):.0f}%</span>"
+
     rows_html = ""
-    for i, (plat, res) in enumerate(platform_results.items()):
+    for idx, row in daily.iterrows():
+        is_best  = (best_roas_date is not None and idx == best_roas_date)
+        is_worst = (worst_cpa_date is not None and idx == worst_cpa_date)
+        if is_best:
+            row_bg = "rgba(63,185,80,0.08)"
+        elif is_worst:
+            row_bg = "rgba(248,81,73,0.08)"
+        else:
+            row_bg = "rgba(255,255,255,0.02)" if idx % 2 else "transparent"
+
+        date_str = row["Date"].strftime("%Y-%m-%d") if hasattr(row["Date"], "strftime") else str(row["Date"])[:10]
+        roas_d   = _day_delta(row["ROAS"], row.get("ROAS_prev", 0), higher_is_better=True)
+        cpa_d    = _day_delta(row["CPA"],  row.get("CPA_prev",  0), higher_is_better=False)
+
+        def _tc(v, extra=""):
+            return (f"<td style='padding:8px 12px;text-align:right;font-family:monospace;"
+                    f"font-size:12px;color:#f0f6fc{extra}'>{v}</td>")
+        def _td(v):
+            return (f"<td style='padding:8px 12px;text-align:right;font-family:monospace;"
+                    f"font-size:12px;color:rgba(255,255,255,0.55)'>{v}</td>")
+
+        rows_html += (
+            f"<tr style='background:{row_bg}'>"
+            f"<td style='padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.6)'>{date_str}</td>"
+            + _tc(_fmt_sar(row["Spend"]))
+            + _tc(_fmt_sar(row["Revenue"]))
+            + f"<td style='padding:8px 12px;text-align:right;font-family:monospace;font-size:12px'>"
+              f"<span style='color:#f0f6fc'>{_fmt_x(row['ROAS'])}</span> {roas_d}</td>"
+            + _tc(_fmt_num(row["Orders"]))
+            + f"<td style='padding:8px 12px;text-align:right;font-family:monospace;font-size:12px'>"
+              f"<span style='color:#f0f6fc'>{_fmt_sar(row['CPA'])}</span> {cpa_d}</td>"
+            + _td(_fmt_pct(row["CTR"]))
+            + _td(_fmt_sar(row["AOV"]))
+            + "</tr>"
+        )
+
+    tbl = (
+        "<div style='background:#161b22;border:1px solid rgba(255,255,255,0.07);"
+        "border-radius:12px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,sans-serif'>"
+        "<table style='width:100%;border-collapse:collapse'>"
+        "<thead><tr style='color:rgba(255,255,255,0.35);text-transform:uppercase;"
+        "font-size:10px;letter-spacing:0.5px;border-bottom:1px solid rgba(255,255,255,0.06)'>"
+        "<th style='text-align:left;padding:8px 12px'>Date</th>"
+        "<th style='text-align:right;padding:8px 12px'>Spend</th>"
+        "<th style='text-align:right;padding:8px 12px'>Revenue</th>"
+        "<th style='text-align:right;padding:8px 12px'>ROAS</th>"
+        "<th style='text-align:right;padding:8px 12px'>Orders</th>"
+        "<th style='text-align:right;padding:8px 12px'>CPA</th>"
+        "<th style='text-align:right;padding:8px 12px'>CTR</th>"
+        "<th style='text-align:right;padding:8px 12px'>AOV</th>"
+        f"</tr></thead><tbody>{rows_html}</tbody></table></div>"
+    )
+    st.html(tbl)
+
+
+def _render_platform_table(results: dict, curr: dict, target_mer: float) -> None:
+    rows_html = ""
+    for i, (plat, res) in enumerate(results.items()):
         s      = res["s"]
         err    = res["err"]
         dot_c  = _PLATFORM_COLORS[plat]
@@ -413,56 +680,63 @@ def _render_project_detail(proj: dict, start: str, end: str, fetch_google=None):
                     f"background:{ind_c};margin-right:6px;flex-shrink:0'></span>")
         plat_dot = (f"<span style='display:inline-block;width:8px;height:8px;border-radius:50%;"
                     f"background:{dot_c};margin-right:7px;flex-shrink:0'></span>")
-        name_cell = (f"<td style='padding:10px 14px'><div style='display:flex;align-items:center'>"
-                     f"{ind_dot}{plat_dot}"
-                     f"<span style='font-weight:600;color:#f0f6fc'>{label}</span></div></td>")
+        name_cell = (
+            f"<td style='padding:10px 14px'><div style='display:flex;align-items:center'>"
+            f"{ind_dot}{plat_dot}<span style='font-weight:600;color:#f0f6fc'>{label}</span>"
+            f"</div></td>"
+        )
 
         if err and res["empty"]:
-            rows_html += (f"<tr style='background:{bg}'>{name_cell}"
-                          f"<td colspan='7' style='padding:10px 14px;color:#ff6b6b;font-size:11px'>"
-                          f"Error: {err}</td></tr>")
-        else:
-            sv   = s.get("spend", 0)
-            rv   = s.get("revenue", 0)
-            rv_  = s.get("roas", 0)
-            cv   = s.get("cpa", 0)
-            ov   = s.get("conversions", 0)
-            tv   = s.get("ctr", 0)
-            pv   = s.get("cpm", 0)
-            rc   = _roas_color(rv_, target_mer)
-            rd   = f"{rv_:.2f}&times;" if sv else "&mdash;"
-            def _td(val, extra=""):
-                return f"<td style='padding:10px 14px;text-align:right;font-family:monospace;color:#f0f6fc{extra}'>{val}</td>"
-            def _td_dim(val):
-                return f"<td style='padding:10px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.55)'>{val}</td>"
             rows_html += (
                 f"<tr style='background:{bg}'>{name_cell}"
-                + _td(_fmt_sar(sv)) + _td(_fmt_sar(rv))
-                + f"<td style='padding:10px 14px;text-align:right;font-family:monospace;color:{rc};font-weight:600'>{rd}</td>"
-                + _td(_fmt_sar(cv)) + _td(_fmt_num(ov))
-                + _td_dim(_fmt_pct(tv)) + _td_dim(_fmt_sar(pv))
+                f"<td colspan='7' style='padding:10px 14px;color:#ff6b6b;font-size:11px'>"
+                f"Error: {err}</td></tr>"
+            )
+        else:
+            sv  = s.get("spend",       0); rv  = s.get("revenue",     0)
+            rv_ = s.get("roas",        0); cv  = s.get("cpa",         0)
+            ov  = s.get("conversions", 0); tv  = s.get("ctr",         0)
+            pv  = s.get("cpm",         0)
+            rc  = _roas_color(rv_, target_mer)
+            rd  = f"{rv_:.2f}&times;" if sv else "&mdash;"
+
+            def _tc(v):
+                return (f"<td style='padding:10px 14px;text-align:right;"
+                        f"font-family:monospace;color:#f0f6fc'>{v}</td>")
+            def _td(v):
+                return (f"<td style='padding:10px 14px;text-align:right;"
+                        f"font-family:monospace;color:rgba(255,255,255,0.55)'>{v}</td>")
+
+            rows_html += (
+                f"<tr style='background:{bg}'>{name_cell}"
+                + _tc(_fmt_sar(sv)) + _tc(_fmt_sar(rv))
+                + f"<td style='padding:10px 14px;text-align:right;font-family:monospace;"
+                  f"color:{rc};font-weight:600'>{rd}</td>"
+                + _tc(_fmt_sar(cv)) + _tc(_fmt_num(ov))
+                + _td(_fmt_pct(tv)) + _td(_fmt_sar(pv))
                 + "</tr>"
             )
 
-    total_roas_d = f"{agg_roas:.2f}&times;" if total_spend else "&mdash;"
-    total_rc     = _roas_color(agg_roas, target_mer)
+    # totals row
+    total_rc = _roas_color(curr["roas"], target_mer)
+    total_rd = f"{curr['roas']:.2f}&times;" if curr["spend"] else "&mdash;"
     rows_html += (
         f"<tr style='background:rgba(255,255,255,0.055);border-top:1px solid rgba(255,255,255,0.1)'>"
         f"<td style='padding:11px 14px'><div style='display:flex;align-items:center'>"
         f"<span style='display:inline-block;width:9px;height:9px;border-radius:2px;"
         f"background:rgba(255,255,255,0.25);margin-right:13px'></span>"
         f"<span style='font-weight:700;color:#f0f6fc'>Total</span></div></td>"
-        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(total_spend)}</td>"
-        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(total_rev)}</td>"
-        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:{total_rc}'>{total_roas_d}</td>"
-        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(agg_cpa)}</td>"
-        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_num(total_orders)}</td>"
-        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.55)'>{_fmt_pct(agg_ctr)}</td>"
-        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.55)'>{_fmt_sar(agg_cpm)}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(curr['spend'])}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(curr['revenue'])}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:{total_rc}'>{total_rd}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(curr['cpa'])}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_num(curr['orders'])}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.55)'>{_fmt_pct(curr['ctr'])}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.55)'></td>"
         f"</tr>"
     )
 
-    table_html = (
+    tbl = (
         "<div style='background:#161b22;border:1px solid rgba(255,255,255,0.07);"
         "border-radius:12px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,sans-serif'>"
         "<table style='width:100%;border-collapse:collapse;font-size:13px'>"
@@ -476,32 +750,112 @@ def _render_project_detail(proj: dict, start: str, end: str, fetch_google=None):
         "<th style='text-align:right;padding:8px 14px'>Orders</th>"
         "<th style='text-align:right;padding:8px 14px'>CTR</th>"
         "<th style='text-align:right;padding:8px 14px'>CPM</th>"
-        "</tr></thead>"
-        f"<tbody>{rows_html}</tbody>"
-        "</table></div>"
+        f"</tr></thead><tbody>{rows_html}</tbody></table></div>"
     )
-    st.html(table_html)
+    st.html(tbl)
+
+
+# ── project detail view ───────────────────────────────────────────────────────
+
+def _render_project_detail(proj: dict, start: str, end: str,
+                           fetch_google=None, fetch_google_daily=None):
+    # nav row
+    back_col, edit_col, _ = st.columns([2, 2, 6])
+    with back_col:
+        if st.button("← Back", key="proj_back"):
+            st.session_state.pop("selected_project_id", None)
+            st.rerun()
+    with edit_col:
+        if st.button("✏️  Edit", key="proj_edit"):
+            _edit_project_dialog(proj)
+
+    plat_cfg   = proj.get("platforms", {})
+    target_cpa = float(proj.get("target_cpa", 0))
+    target_mer = float(proj.get("target_mer", 0))
+
+    # previous period dates
+    start_dt   = datetime.strptime(start, "%Y-%m-%d")
+    end_dt     = datetime.strptime(end,   "%Y-%m-%d")
+    days       = (end_dt - start_dt).days + 1
+    prev_end   = (start_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+    prev_start = (start_dt - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    st.markdown(
+        f"<div style='margin:8px 0 20px'>"
+        f"<div style='font-size:28px;font-weight:900;color:#f0f6fc;letter-spacing:-1px'>{proj['name']}</div>"
+        f"<div style='font-size:12px;color:rgba(255,255,255,0.35);margin-top:6px'>"
+        f"{_platform_dots(plat_cfg)} &nbsp;Cross-platform &middot; {start} &rarr; {end}"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── fetch all platform data ────────────────────────────────────────────
+    platform_results: dict[str, dict] = {}
+
+    for plat in ["google", "meta", "snap", "tiktok"]:
+        acct = plat_cfg.get(plat, {})
+        ids  = list(acct.values()) if isinstance(acct, dict) else []
+        if not any(str(v).strip() for v in ids):
+            continue
+        with st.spinner(f"Loading {_PLATFORM_LABELS[plat]}…"):
+            df,      err  = _fetch_platform_df(plat, proj, start,      end,        fetch_google)
+            df_prev, _    = _fetch_platform_df(plat, proj, prev_start, prev_end,   fetch_google)
+            daily         = _fetch_daily_df(   plat, proj, start,      end,        fetch_google_daily)
+        platform_results[plat] = {
+            "s":     _summarise(df),
+            "s_prev":_summarise(df_prev),
+            "daily": daily,
+            "err":   err,
+            "empty": df.empty,
+        }
+
+    if not platform_results:
+        st.info("No connected platforms with data for this date range.")
+        return
+
+    curr = _agg_totals(platform_results)
+    prev = {
+        k: sum(r["s_prev"].get(k, 0) for r in platform_results.values())
+        for k in ("spend","revenue","conversions","impressions","clicks")
+    }
+    # recompute derived prev metrics
+    prev["roas"] = prev["revenue"] / prev["spend"]  if prev["spend"]       else 0.0
+    prev["cpa"]  = prev["spend"]   / prev["conversions"] if prev["conversions"] else 0.0
+    prev["ctr"]  = prev["clicks"]  / prev["impressions"] * 100 if prev["impressions"] else 0.0
+    prev["aov"]  = prev["revenue"] / prev["conversions"] if prev["conversions"] else 0.0
+    prev["cvr"]  = prev["conversions"] / prev["clicks"] * 100 if prev["clicks"] else 0.0
+    prev["mer"]  = prev["revenue"] / prev["spend"]  if prev["spend"]       else 0.0
+
+    daily_agg = _aggregate_daily(platform_results)
+
+    # ── TOP: 3 summary cards ───────────────────────────────────────────────
+    _render_top_cards(curr, prev)
+
+    # ── MIDDLE: 8 metric cards ─────────────────────────────────────────────
+    _section_label("Performance Metrics")
+    _render_metric_grid(curr, prev, target_mer, target_cpa)
+
+    # ── DAILY CHART ────────────────────────────────────────────────────────
+    _section_label("Daily Trend")
+    _render_daily_chart(daily_agg)
+
+    # ── DAILY LOG TABLE ────────────────────────────────────────────────────
+    _section_label("Daily Log")
+    _render_daily_table(daily_agg)
+
+    # ── PLATFORM BREAKDOWN ─────────────────────────────────────────────────
+    _section_label("Platform Breakdown")
+    _render_platform_table(platform_results, curr, target_mer)
 
     if target_mer > 0:
-        hi = target_mer
         lo = target_mer * 0.8
         st.markdown(
-            f"<div style='margin-top:8px;font-size:11px;color:rgba(255,255,255,0.35)'>"
-            f"<span style='color:#3fb950'>&#9679;</span> ROAS &ge; {hi:.1f}&times; &nbsp;"
-            f"<span style='color:#e3b341'>&#9679;</span> ROAS &ge; {lo:.1f}&times; &nbsp;"
-            f"<span style='color:#f85149'>&#9679;</span> ROAS &lt; {lo:.1f}&times;</div>",
+            f"<div style='margin-top:8px;font-size:11px;color:rgba(255,255,255,0.3)'>"
+            f"<span style='color:#3fb950'>●</span> ROAS &ge; {target_mer:.1f}&times; &nbsp;"
+            f"<span style='color:#e3b341'>●</span> &ge; {lo:.1f}&times; &nbsp;"
+            f"<span style='color:#f85149'>●</span> &lt; {lo:.1f}&times;</div>",
             unsafe_allow_html=True,
         )
-
-
-def _roas_color(roas: float, target_mer: float) -> str:
-    if target_mer <= 0:
-        return "#f0f6fc"
-    if roas >= target_mer:
-        return "#3fb950"
-    if roas >= target_mer * 0.8:
-        return "#e3b341"
-    return "#f85149"
 
 
 # ── card grid ─────────────────────────────────────────────────────────────────
@@ -509,36 +863,32 @@ def _roas_color(roas: float, target_mer: float) -> str:
 def _render_cards(projects: list[dict]):
     cols = st.columns(3, gap="medium")
     for i, proj in enumerate(projects):
-        plat_cfg = proj.get("platforms", {})
+        plat_cfg   = proj.get("platforms", {})
         target_cpa = proj.get("target_cpa", 0)
         target_mer = proj.get("target_mer", 0)
         dots = _platform_dots(plat_cfg)
 
         with cols[i % 3]:
             btn_key = f"proj_card_{proj['id']}"
-            st.markdown(f"""
-            <div style='background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
-                        border-radius:14px;padding:18px 20px 14px;margin-bottom:4px'>
-              <div style='font-size:17px;font-weight:700;color:#f0f6fc;margin-bottom:10px'>
-                {proj['name']}
-              </div>
-              <div style='margin-bottom:12px'>{dots}</div>
-              <div style='display:flex;gap:24px'>
-                <div>
-                  <div style='font-size:9.5px;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.8px'>Target CPA</div>
-                  <div style='font-size:14px;font-weight:600;color:#58a6ff'>
-                    {_fmt_sar(target_cpa) if target_cpa else "—"}
-                  </div>
-                </div>
-                <div>
-                  <div style='font-size:9.5px;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.8px'>Target MER</div>
-                  <div style='font-size:14px;font-weight:600;color:#58a6ff'>
-                    {f"{target_mer:.1f}×" if target_mer else "—"}
-                  </div>
-                </div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                f"<div style='background:rgba(255,255,255,0.04);"
+                f"border:1px solid rgba(255,255,255,0.08);border-radius:14px;"
+                f"padding:18px 20px 14px;margin-bottom:4px'>"
+                f"<div style='font-size:17px;font-weight:700;color:#f0f6fc;margin-bottom:10px'>"
+                f"{proj['name']}</div>"
+                f"<div style='margin-bottom:12px'>{dots}</div>"
+                f"<div style='display:flex;gap:24px'>"
+                f"<div><div style='font-size:9.5px;color:rgba(255,255,255,0.35);"
+                f"text-transform:uppercase;letter-spacing:0.8px'>Target CPA</div>"
+                f"<div style='font-size:14px;font-weight:600;color:#58a6ff'>"
+                f"{_fmt_sar(target_cpa) if target_cpa else '—'}</div></div>"
+                f"<div><div style='font-size:9.5px;color:rgba(255,255,255,0.35);"
+                f"text-transform:uppercase;letter-spacing:0.8px'>Target MER</div>"
+                f"<div style='font-size:14px;font-weight:600;color:#58a6ff'>"
+                f"{f'{target_mer:.1f}×' if target_mer else '—'}</div></div>"
+                f"</div></div>",
+                unsafe_allow_html=True,
+            )
             if st.button("Open →", key=btn_key, use_container_width=True):
                 st.session_state["selected_project_id"] = proj["id"]
                 st.rerun()
@@ -546,30 +896,29 @@ def _render_cards(projects: list[dict]):
 
 # ── main entry point ──────────────────────────────────────────────────────────
 
-def render_projects_page(start: str, end: str, fetch_google=None):
+def render_projects_page(start: str, end: str,
+                         fetch_google=None, fetch_google_daily=None):
     projects = load_projects()
 
     sel_id = st.session_state.get("selected_project_id")
     if sel_id:
         proj = next((p for p in projects if p["id"] == sel_id), None)
         if proj:
-            _render_project_detail(proj, start, end, fetch_google=fetch_google)
+            _render_project_detail(proj, start, end,
+                                   fetch_google=fetch_google,
+                                   fetch_google_daily=fetch_google_daily)
             return
-        else:
-            st.session_state.pop("selected_project_id", None)
+        st.session_state.pop("selected_project_id", None)
 
     hcol, bcol = st.columns([4, 1])
     with hcol:
-        st.markdown("""
-        <div style='padding:8px 0 4px'>
-          <div style='font-size:26px;font-weight:900;color:#f0f6fc;letter-spacing:-1px;line-height:1'>
-            Projects
-          </div>
-          <div style='font-size:13px;color:rgba(255,255,255,0.28);margin-top:5px'>
-            Cross-platform overview per client
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            "<div style='padding:8px 0 4px'>"
+            "<div style='font-size:26px;font-weight:900;color:#f0f6fc;letter-spacing:-1px'>Projects</div>"
+            "<div style='font-size:13px;color:rgba(255,255,255,0.28);margin-top:5px'>"
+            "Cross-platform overview per client</div></div>",
+            unsafe_allow_html=True,
+        )
     with bcol:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
         if st.button("＋  New project", type="primary", use_container_width=True):
