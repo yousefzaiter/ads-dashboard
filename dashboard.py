@@ -1880,7 +1880,7 @@ if _is_admin and (_cross_meta_id or _cross_snap_id) and selected_customer_id:
         _cp_gday = fetch_daily_data(selected_customer_id, token, dev_token, start_str, end_str, mcc_id)
         _cp_mdf  = fetch_meta_campaigns(_meta_token, _cross_meta_id, start_str, end_str) if _cross_meta_id and _meta_token and _meta_ready else pd.DataFrame()
         _cp_mday = fetch_meta_daily(_meta_token, _cross_meta_id, start_str, end_str)     if _cross_meta_id and _meta_token and _meta_ready else pd.DataFrame()
-        _cp_sdf  = fetch_snap_campaigns(_snap_token, _cross_snap_id, start_str, end_str) if _cross_snap_id and _snap_token and _snap_ready else pd.DataFrame()
+        _cp_sdf  = fetch_snap_campaigns(_snap_token, _cross_snap_id, start_str, end_str, show_paused=False) if _cross_snap_id and _snap_token and _snap_ready else pd.DataFrame()
         _cp_sday = fetch_snap_daily(_snap_token, _cross_snap_id, start_str, end_str)     if _cross_snap_id and _snap_token and _snap_ready else pd.DataFrame()
 
     # ── Google aggregates ─────────────────────────────────────────────────────
@@ -2517,7 +2517,7 @@ if _platform == "🟡  Snap Ads":
     # ══════════════════════════════════════════════════════════════════════════
     if _sv == "campaigns":
         with st.spinner(""):
-            _sdf_camp  = fetch_snap_campaigns(_snap_token, selected_snap_acct_id, start_str, end_str)
+            _sdf_camp  = fetch_snap_campaigns(_snap_token, selected_snap_acct_id, start_str, end_str, show_paused=show_paused)
             _sdf_daily = fetch_snap_daily(_snap_token, selected_snap_acct_id, start_str, end_str)
 
         if _sdf_camp.empty:

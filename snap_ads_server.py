@@ -224,8 +224,11 @@ def fetch_snap_accounts(token: str) -> list[dict]:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_snap_campaigns(token: str, account_id: str,
-                         start: str, end: str) -> pd.DataFrame:
-    """Campaign-level performance for a Snap ad account."""
+                         start: str, end: str,
+                         show_paused: bool = False) -> pd.DataFrame:
+    """Campaign-level performance for a Snap ad account.
+    Only fetches stats for ACTIVE campaigns by default to avoid making
+    hundreds of API calls for large accounts with many paused campaigns."""
     try:
         resp = _get(f"/adaccounts/{account_id}/campaigns", token)
     except RuntimeError as e:
@@ -237,20 +240,27 @@ def fetch_snap_campaigns(token: str, account_id: str,
 
     records = []
     for c_wrap in resp.get("campaigns", []):
-        c       = c_wrap.get("campaign", {})
-        camp_id = c.get("id", "")
+        c           = c_wrap.get("campaign", {})
+        camp_id     = c.get("id", "")
+        camp_status = c.get("status", "PAUSED")
+
+        # Skip PAUSED campaigns unless show_paused requested — avoids
+        # hundreds of wasted API calls on large accounts.
+        if not show_paused and camp_status != "ACTIVE":
+            continue
+
         try:
             s = _fetch_stats(f"/campaigns/{camp_id}/stats", token, start, end)
         except Exception as ex:
             st.warning(f"Snap stats error for {c.get('name', camp_id)}: {ex}")
             s = _empty_stats()
         records.append(_to_df_row(
-            c.get("name", ""), camp_id, account_id,
-            c.get("status", "PAUSED"), "SNAP", s,
+            c.get("name", ""), camp_id, account_id, camp_status, "SNAP", s,
         ))
 
-    df = pd.DataFrame(records)
-    return df[df["Cost"] > 0].reset_index(drop=True) if not df.empty else df
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records).reset_index(drop=True)
 
 
 # ── Daily data ────────────────────────────────────────────────────────────────
@@ -269,6 +279,8 @@ def fetch_snap_daily(token: str, account_id: str,
     _daily_fields = "impressions,swipes,spend,conversion_purchases,conversion_purchases_value"
 
     for c_wrap in resp.get("campaigns", []):
+        if c_wrap.get("campaign", {}).get("status") != "ACTIVE":
+            continue
         c       = c_wrap.get("campaign", {})
         camp_id = c.get("id", "")
         try:
@@ -326,6 +338,8 @@ def fetch_snap_adsets(token: str, campaign_id: str,
     for sq_wrap in resp.get("adsquads", []):
         sq    = sq_wrap.get("adsquad", {})
         sq_id = sq.get("id", "")
+        if sq.get("status") not in ("ACTIVE", "PAUSED"):
+            continue
         try:
             s = _fetch_stats(f"/adsquads/{sq_id}/stats", token, start, end)
         except Exception:
@@ -335,8 +349,9 @@ def fetch_snap_adsets(token: str, campaign_id: str,
             sq.get("status", "PAUSED"), "SNAP_ADSET", s,
         ))
 
-    df = pd.DataFrame(records)
-    return df[df["Cost"] > 0].reset_index(drop=True) if not df.empty else df
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records).reset_index(drop=True)
 
 
 # ── Ads ───────────────────────────────────────────────────────────────────────
@@ -367,5 +382,7 @@ def fetch_snap_ads(token: str, adset_id: str,
             ad.get("status", "PAUSED"), "SNAP_AD", s,
         ))
 
-    df = pd.DataFrame(records)
-    return df[df["Cost"] > 0].reset_index(drop=True) if not df.empty else df
+
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records).reset_index(drop=True)
