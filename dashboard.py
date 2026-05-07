@@ -1543,6 +1543,7 @@ st.session_state.setdefault("snap_selected_adset", None)
 st.session_state.setdefault("tiktok_view", "campaigns")
 st.session_state.setdefault("tiktok_selected_campaign", None)
 st.session_state.setdefault("tiktok_selected_adset", None)
+st.session_state.setdefault("selected_project_id", None)
 
 # ── Auth (needed early for client list) ───────────────────────────────────────
 try:
@@ -1850,7 +1851,7 @@ with st.sidebar:
         st.divider()
         _page = st.radio(
             "NAVIGATE",
-            ["📊  Dashboard", "✍️  Campaign Creator", "⚙️  Admin Panel"],
+            ["🗂️  Projects", "📊  Dashboard", "✍️  Campaign Creator", "⚙️  Admin Panel"],
             index=0,
             key="_nav_page",
             label_visibility="visible",
@@ -1859,6 +1860,22 @@ with st.sidebar:
         _page = "📊  Dashboard"
 
 # ── Page routing (admin-only pages) ───────────────────────────────────────────
+if _page == "🗂️  Projects":
+    from projects_page import render_projects_page
+
+    def _google_fetch_for_projects(customer_id: str, start: str, end: str):
+        _tok  = os.getenv("GOOGLE_ADS_REFRESH_TOKEN", "")
+        _dev  = os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN", "")
+        _mcc  = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "")
+        return fetch_campaign_data(customer_id, _tok, _dev, start, end, _mcc)
+
+    render_projects_page(
+        start=start_date.strftime("%Y-%m-%d"),
+        end=end_date.strftime("%Y-%m-%d"),
+        fetch_google=_google_fetch_for_projects,
+    )
+    st.stop()
+
 if _page == "⚙️  Admin Panel":
     from admin_panel import render_admin_panel
     render_admin_panel()
