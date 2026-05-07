@@ -18,9 +18,10 @@ load_dotenv(
     override=True,
 )
 
-SNAP_API  = "https://adsapi.snapchat.com/v1"
-TOKEN_URL = "https://accounts.snapchat.com/login/oauth2/access_token"
-_ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+SNAP_API    = "https://adsapi.snapchat.com/v1"
+TOKEN_URL   = "https://accounts.snapchat.com/login/oauth2/access_token"
+_ENV_PATH   = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+USD_TO_SAR  = 3.75
 
 _STAT_FIELDS = ",".join([
     "impressions", "swipes", "spend",
@@ -114,6 +115,24 @@ def _show_token_error() -> None:
     )
 
 
+# ── Currency helpers ──────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_snap_account_currency(token: str, account_id: str) -> str:
+    """Return the billing currency for a Snap ad account (e.g. 'USD', 'SAR')."""
+    try:
+        data = _get(f"/adaccounts/{account_id}", token)
+        return data.get("adaccount", {}).get("currency", "SAR").upper()
+    except Exception:
+        return "SAR"
+
+
+def _to_sar(amount: float, currency: str) -> float:
+    if currency == "USD":
+        return round(amount * USD_TO_SAR, 2)
+    return amount
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _ts(date_str: str, end: bool = False) -> str:
@@ -126,15 +145,15 @@ def _ts(date_str: str, end: bool = False) -> str:
     return f"{date_str}T00:00:00.000+03:00"
 
 
-def _parse_stats(stats: dict) -> dict:
+def _parse_stats(stats: dict, currency: str = "SAR") -> dict:
     """Extract metrics from a Snap stats dict (already the inner 'stats' object)."""
     spend_micro = float(stats.get("spend", 0) or 0)
-    spend       = spend_micro / 1_000_000
+    spend       = _to_sar(spend_micro / 1_000_000, currency)
     impressions = int(stats.get("impressions", 0) or 0)
     swipes      = int(stats.get("swipes", 0) or 0)
     video_views = int(stats.get("video_views", 0) or 0)
     conv        = int(stats.get("conversion_purchases", 0) or 0)
-    conv_value  = float(stats.get("conversion_purchases_value", 0) or 0) / 1_000_000
+    conv_value  = _to_sar(float(stats.get("conversion_purchases_value", 0) or 0) / 1_000_000, currency)
 
     swipe_rate = round(swipes / impressions * 100, 4) if impressions > 0 else 0.0
     cps        = round(spend / swipes, 2)         if swipes > 0      else 0.0
@@ -152,9 +171,9 @@ def _parse_stats(stats: dict) -> dict:
     }
 
 
-def _parse_total_stats(timeseries_stat: dict) -> dict:
+def _parse_total_stats(timeseries_stat: dict, currency: str = "SAR") -> dict:
     """Legacy wrapper — kept for _fetch_stats compatibility."""
-    return _parse_stats(timeseries_stat.get("total_stats", {}))
+    return _parse_stats(timeseries_stat.get("total_stats", {}), currency)
 
 
 def _empty_stats() -> dict:
@@ -184,7 +203,7 @@ def _to_df_row(name: str, entity_id: str, parent_id: str,
     }
 
 
-def _fetch_stats(path: str, token: str, start: str, end: str) -> dict:
+def _fetch_stats(path: str, token: str, start: str, end: str, currency: str = "SAR") -> dict:
     """Fetch TOTAL-granularity stats. Response: total_stats[0].total_stat.stats"""
     resp = _get(path, token, {
         "granularity": "TOTAL",
@@ -195,7 +214,7 @@ def _fetch_stats(path: str, token: str, start: str, end: str) -> dict:
     rows = resp.get("total_stats", [])
     if not rows:
         return _empty_stats()
-    return _parse_stats(rows[0].get("total_stat", {}).get("stats", {}))
+    return _parse_stats(rows[0].get("total_stat", {}).get("stats", {}), currency)
 
 
 # ── Ad accounts ───────────────────────────────────────────────────────────────
@@ -238,7 +257,8 @@ def fetch_snap_campaigns(token: str, account_id: str,
             st.error(f"Snap API error: {e}")
         return pd.DataFrame()
 
-    records = []
+    currency = get_snap_account_currency(token, account_id)
+    records  = []
     for c_wrap in resp.get("campaigns", []):
         c           = c_wrap.get("campaign", {})
         camp_id     = c.get("id", "")
@@ -250,7 +270,7 @@ def fetch_snap_campaigns(token: str, account_id: str,
             continue
 
         try:
-            s = _fetch_stats(f"/campaigns/{camp_id}/stats", token, start, end)
+            s = _fetch_stats(f"/campaigns/{camp_id}/stats", token, start, end, currency)
         except Exception as ex:
             st.warning(f"Snap stats error for {c.get('name', camp_id)}: {ex}")
             s = _empty_stats()
@@ -275,6 +295,7 @@ def fetch_snap_daily(token: str, account_id: str,
     except RuntimeError:
         return pd.DataFrame()
 
+    currency      = get_snap_account_currency(token, account_id)
     daily: dict[str, dict] = {}
     _daily_fields = "impressions,swipes,spend,conversion_purchases,conversion_purchases_value"
 
@@ -296,8 +317,8 @@ def fetch_snap_daily(token: str, account_id: str,
             for pt in row.get("timeseries_stat", {}).get("timeseries", []):
                 day   = pt.get("start_time", "")[:10]
                 stats = pt.get("stats", {})
-                spend      = float(stats.get("spend", 0) or 0) / 1_000_000
-                conv_value = float(stats.get("conversion_purchases_value", 0) or 0) / 1_000_000
+                spend      = _to_sar(float(stats.get("spend", 0) or 0) / 1_000_000, currency)
+                conv_value = _to_sar(float(stats.get("conversion_purchases_value", 0) or 0) / 1_000_000, currency)
                 if day not in daily:
                     daily[day] = {"Impressions": 0, "Clicks": 0,
                                   "Cost": 0.0, "Conversions": 0.0, "Conv. Value": 0.0}
@@ -323,7 +344,8 @@ def fetch_snap_daily(token: str, account_id: str,
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_snap_adsets(token: str, campaign_id: str,
-                      start: str, end: str) -> pd.DataFrame:
+                      start: str, end: str,
+                      account_id: str = "") -> pd.DataFrame:
     """Ad-squad-level insights for a campaign."""
     try:
         resp = _get(f"/campaigns/{campaign_id}/adsquads", token)
@@ -334,14 +356,15 @@ def fetch_snap_adsets(token: str, campaign_id: str,
             st.error(f"Snap API error: {e}")
         return pd.DataFrame()
 
-    records = []
+    currency = get_snap_account_currency(token, account_id) if account_id else "SAR"
+    records  = []
     for sq_wrap in resp.get("adsquads", []):
         sq    = sq_wrap.get("adsquad", {})
         sq_id = sq.get("id", "")
         if sq.get("status") not in ("ACTIVE", "PAUSED"):
             continue
         try:
-            s = _fetch_stats(f"/adsquads/{sq_id}/stats", token, start, end)
+            s = _fetch_stats(f"/adsquads/{sq_id}/stats", token, start, end, currency)
         except Exception:
             s = _empty_stats()
         records.append(_to_df_row(
@@ -358,7 +381,8 @@ def fetch_snap_adsets(token: str, campaign_id: str,
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_snap_ads(token: str, adset_id: str,
-                   start: str, end: str) -> pd.DataFrame:
+                   start: str, end: str,
+                   account_id: str = "") -> pd.DataFrame:
     """Ad-level insights for an ad squad."""
     try:
         resp = _get(f"/adsquads/{adset_id}/ads", token)
@@ -369,12 +393,13 @@ def fetch_snap_ads(token: str, adset_id: str,
             st.error(f"Snap API error: {e}")
         return pd.DataFrame()
 
-    records = []
+    currency = get_snap_account_currency(token, account_id) if account_id else "SAR"
+    records  = []
     for ad_wrap in resp.get("ads", []):
         ad    = ad_wrap.get("ad", {})
         ad_id = ad.get("id", "")
         try:
-            s = _fetch_stats(f"/ads/{ad_id}/stats", token, start, end)
+            s = _fetch_stats(f"/ads/{ad_id}/stats", token, start, end, currency)
         except Exception:
             s = _empty_stats()
         records.append(_to_df_row(

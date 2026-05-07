@@ -2516,7 +2516,7 @@ if _platform == "🟡  Snap Ads":
     # Snap Level 1 — Campaigns
     # ══════════════════════════════════════════════════════════════════════════
     if _sv == "campaigns":
-        with st.spinner(""):
+        with st.spinner("جاري تحميل حملات سناب..."):
             _sdf_camp  = fetch_snap_campaigns(_snap_token, selected_snap_acct_id, start_str, end_str, show_paused=show_paused)
             _sdf_daily = fetch_snap_daily(_snap_token, selected_snap_acct_id, start_str, end_str)
 
@@ -2694,8 +2694,8 @@ if _platform == "🟡  Snap Ads":
         _snap_camp_name = _ssc["name"]
         st.markdown(f'<div class="sec-label">Ad Squads — {_snap_camp_name}</div>', unsafe_allow_html=True)
 
-        with st.spinner(""):
-            _sdf_adsets = fetch_snap_adsets(_snap_token, _snap_camp_id, start_str, end_str)
+        with st.spinner("جاري تحميل مجموعات الإعلانات..."):
+            _sdf_adsets = fetch_snap_adsets(_snap_token, _snap_camp_id, start_str, end_str, account_id=selected_snap_acct_id)
 
         if _sdf_adsets.empty:
             st.info(f"No ad squad data for '{_snap_camp_name}' in this date range.")
@@ -2743,8 +2743,8 @@ if _platform == "🟡  Snap Ads":
         _snap_adset_name = _ssa["name"]
         st.markdown(f'<div class="sec-label">Ads — {_snap_adset_name}</div>', unsafe_allow_html=True)
 
-        with st.spinner(""):
-            _sdf_ads = fetch_snap_ads(_snap_token, _snap_adset_id, start_str, end_str)
+        with st.spinner("جاري تحميل الإعلانات..."):
+            _sdf_ads = fetch_snap_ads(_snap_token, _snap_adset_id, start_str, end_str, account_id=selected_snap_acct_id)
 
         if _sdf_ads.empty:
             st.info(f"No ad data for '{_snap_adset_name}' in this date range.")
