@@ -50,7 +50,6 @@ def _platform_dots(platforms: dict) -> str:
     dots = []
     for key, color in _PLATFORM_COLORS.items():
         acct = (platforms or {}).get(key, {})
-        # a platform is "connected" if it has a non-empty account id
         ids = list(acct.values()) if isinstance(acct, dict) else []
         active = any(str(v).strip() for v in ids)
         opacity = "1" if active else "0.18"
@@ -66,10 +65,10 @@ def _fmt_sar(v: float) -> str:
     if v == 0:
         return "—"
     if v >= 1_000_000:
-        return f"SAR {v/1_000_000:.1f}M"
+        return f"SAR {v/1_000_000:.2f}M"
     if v >= 1_000:
-        return f"SAR {v/1_000:.1f}K"
-    return f"SAR {v:,.0f}"
+        return f"SAR {v/1_000:.2f}K"
+    return f"SAR {v:,.2f}"
 
 
 def _fmt_num(v: float) -> str:
@@ -80,6 +79,27 @@ def _fmt_num(v: float) -> str:
     if v >= 1_000:
         return f"{v/1_000:.1f}K"
     return f"{v:,.0f}"
+
+
+def _fmt_pct(v: float) -> str:
+    if v == 0:
+        return "—"
+    return f"{v:.2f}%"
+
+
+def _roas_indicator(roas: float, target_mer: float) -> str:
+    """Returns a colored circle HTML. Green/yellow/red vs target, grey if no target."""
+    if target_mer <= 0:
+        color = "rgba(255,255,255,0.25)"
+    elif roas >= target_mer:
+        color = "#3fb950"       # green
+    elif roas >= target_mer * 0.8:
+        color = "#e3b341"       # yellow
+    else:
+        color = "#f85149"       # red
+    return (f"<span style='display:inline-block;width:10px;height:10px;"
+            f"border-radius:50%;background:{color};margin-right:8px;"
+            f"flex-shrink:0;margin-top:2px'></span>")
 
 
 # ── new-project dialog ────────────────────────────────────────────────────────
@@ -99,7 +119,7 @@ def _new_project_dialog():
     with g_col:
         google_cid = st.text_input("Google Ads Customer ID", placeholder="1234567890")
     with m_col:
-        meta_aid = st.text_input("Meta Ad Account ID", placeholder="act_123456")
+        meta_aid = st.text_input("Meta Ad Account ID", placeholder="act_579554746963968")
     s_col, t_col = st.columns(2)
     with s_col:
         snap_aid = st.text_input("Snap Ad Account ID", placeholder="xxxxxxxx-xxxx-...")
@@ -195,217 +215,319 @@ def _edit_project_dialog(proj: dict):
 # ── cross-platform data fetcher ───────────────────────────────────────────────
 
 def _fetch_platform_df(platform: str, proj: dict, start: str, end: str,
-                       fetch_google=None) -> pd.DataFrame:
+                       fetch_google=None) -> tuple[pd.DataFrame, str | None]:
+    """Returns (df, error_message). df is empty on error/skip; error is None on success."""
     plat = proj.get("platforms", {}).get(platform, {})
 
     if platform == "google":
         cid = plat.get("customer_id", "").strip()
-        if not cid or fetch_google is None:
-            return pd.DataFrame()
+        if not cid:
+            return pd.DataFrame(), None
+        if fetch_google is None:
+            return pd.DataFrame(), "fetch_google not provided"
         try:
-            return fetch_google(cid, start, end)
-        except Exception:
-            return pd.DataFrame()
+            df = fetch_google(cid, start, end)
+            return df, None
+        except Exception as e:
+            return pd.DataFrame(), str(e)[:80]
 
     if platform == "meta":
         acct = plat.get("ad_account_id", "").strip()
         if not acct:
-            return pd.DataFrame()
+            return pd.DataFrame(), None
         try:
             from meta_ads_server import fetch_meta_campaigns
             token = os.getenv("META_ACCESS_TOKEN", "")
-            return fetch_meta_campaigns(token, acct, start, end)
-        except Exception:
-            return pd.DataFrame()
+            if not token:
+                return pd.DataFrame(), "No META_ACCESS_TOKEN"
+            df = fetch_meta_campaigns(token, acct, start, end)
+            return df, None
+        except Exception as e:
+            return pd.DataFrame(), str(e)[:80]
 
     if platform == "snap":
         acct = plat.get("ad_account_id", "").strip()
         if not acct:
-            return pd.DataFrame()
+            return pd.DataFrame(), None
         try:
             from snap_ads_server import fetch_snap_campaigns
             token = os.getenv("SNAP_ACCESS_TOKEN", "")
-            return fetch_snap_campaigns(token, acct, start, end)
-        except Exception:
-            return pd.DataFrame()
+            if not token:
+                return pd.DataFrame(), "No SNAP_ACCESS_TOKEN"
+            df = fetch_snap_campaigns(token, acct, start, end)
+            return df, None
+        except Exception as e:
+            return pd.DataFrame(), str(e)[:80]
 
     if platform == "tiktok":
         adv = plat.get("advertiser_id", "").strip()
         if not adv:
-            return pd.DataFrame()
+            return pd.DataFrame(), None
+        token = os.getenv("TIKTOK_ACCESS_TOKEN", "")
+        if not token or token == "pending":
+            return pd.DataFrame(), "Credentials pending"
         try:
             from tiktok_ads_server import fetch_tiktok_campaigns
-            token = os.getenv("TIKTOK_ACCESS_TOKEN", "")
-            if not token or token == "pending":
-                return pd.DataFrame()
-            return fetch_tiktok_campaigns(token, adv, start, end, show_paused=False)
-        except Exception:
-            return pd.DataFrame()
+            df = fetch_tiktok_campaigns(token, adv, start, end, show_paused=False)
+            return df, None
+        except Exception as e:
+            return pd.DataFrame(), str(e)[:80]
 
-    return pd.DataFrame()
+    return pd.DataFrame(), None
 
 
 def _summarise(df: pd.DataFrame) -> dict:
+    """Aggregate a campaigns DataFrame to a single-row summary dict."""
     if df.empty:
         return {}
-    spend       = df["Cost"].sum() if "Cost" in df.columns else 0
-    revenue     = df["Conv. Value"].sum() if "Conv. Value" in df.columns else 0
-    conversions = df["Conversions"].sum() if "Conversions" in df.columns else 0
-    impressions = df["Impressions"].sum() if "Impressions" in df.columns else 0
-    clicks      = df["Clicks"].sum() if "Clicks" in df.columns else 0
-    roas        = revenue / spend if spend else 0
-    cpa         = spend / conversions if conversions else 0
+    spend       = float(df["Cost"].sum())          if "Cost" in df.columns        else 0.0
+    revenue     = float(df["Conv. Value"].sum())   if "Conv. Value" in df.columns else 0.0
+    conversions = float(df["Conversions"].sum())   if "Conversions" in df.columns else 0.0
+    impressions = float(df["Impressions"].sum())   if "Impressions" in df.columns else 0.0
+    clicks      = float(df["Clicks"].sum())        if "Clicks" in df.columns      else 0.0
+    roas   = revenue / spend       if spend else 0.0
+    cpa    = spend / conversions   if conversions else 0.0
+    ctr    = clicks / impressions * 100 if impressions else 0.0
+    cpm    = spend / impressions * 1000 if impressions else 0.0
     return {
         "spend": spend, "revenue": revenue, "conversions": conversions,
-        "impressions": impressions, "clicks": clicks, "roas": roas, "cpa": cpa,
+        "impressions": impressions, "clicks": clicks,
+        "roas": roas, "cpa": cpa, "ctr": ctr, "cpm": cpm,
     }
 
 
 # ── project detail view ───────────────────────────────────────────────────────
 
 def _render_project_detail(proj: dict, start: str, end: str, fetch_google=None):
-    # back button
-    if st.button("← Back to projects", key="proj_back"):
-        st.session_state.pop("selected_project_id", None)
-        st.rerun()
+    # back + edit row
+    back_col, edit_col, _ = st.columns([2, 2, 6])
+    with back_col:
+        if st.button("← Back", key="proj_back"):
+            st.session_state.pop("selected_project_id", None)
+            st.rerun()
+    with edit_col:
+        if st.button("✏️  Edit", key="proj_edit"):
+            _edit_project_dialog(proj)
 
-    plat_cfg = proj.get("platforms", {})
+    plat_cfg   = proj.get("platforms", {})
+    target_cpa = float(proj.get("target_cpa", 0))
+    target_mer = float(proj.get("target_mer", 0))
 
     st.markdown(f"""
     <div style='margin:8px 0 20px'>
-      <div style='font-size:26px;font-weight:900;color:#f0f6fc;letter-spacing:-1px'>
+      <div style='font-size:28px;font-weight:900;color:#f0f6fc;letter-spacing:-1px'>
         {proj['name']}
       </div>
-      <div style='font-size:12px;color:rgba(255,255,255,0.35);margin-top:4px'>
-        {_platform_dots(plat_cfg)} Cross-platform · {start} → {end}
+      <div style='font-size:12px;color:rgba(255,255,255,0.35);margin-top:6px;display:flex;align-items:center;gap:6px'>
+        {_platform_dots(plat_cfg)}
+        <span>Cross-platform · {start} → {end}</span>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    if st.button("✏️  Edit project", key="proj_edit"):
-        _edit_project_dialog(proj)
+    # ── fetch data for each connected platform ─────────────────────────────
+    platform_results: dict[str, dict] = {}   # platform → {"s": summary, "err": str|None}
 
-    st.markdown("---")
-
-    rows = []
     for plat in ["google", "meta", "snap", "tiktok"]:
         acct = plat_cfg.get(plat, {})
-        ids = list(acct.values()) if isinstance(acct, dict) else []
+        ids  = list(acct.values()) if isinstance(acct, dict) else []
         if not any(str(v).strip() for v in ids):
             continue
-        df = _fetch_platform_df(plat, proj, start, end, fetch_google=fetch_google)
-        s = _summarise(df)
-        rows.append({
-            "Platform":    _PLATFORM_LABELS[plat],
-            "Spend":       s.get("spend", 0),
-            "Revenue":     s.get("revenue", 0),
-            "ROAS":        s.get("roas", 0),
-            "CPA":         s.get("cpa", 0),
-            "Orders":      s.get("conversions", 0),
-            "Impressions": s.get("impressions", 0),
-            "Clicks":      s.get("clicks", 0),
-        })
+        label = _PLATFORM_LABELS[plat]
+        with st.spinner(f"Loading {label}…"):
+            df, err = _fetch_platform_df(plat, proj, start, end, fetch_google=fetch_google)
+        platform_results[plat] = {"s": _summarise(df), "err": err, "empty": df.empty}
 
-    if not rows:
+    if not platform_results:
         st.info("No connected platforms with data for this date range.")
         return
 
-    # totals row
-    total_spend   = sum(r["Spend"] for r in rows)
-    total_rev     = sum(r["Revenue"] for r in rows)
-    total_orders  = sum(r["Orders"] for r in rows)
-    total_impr    = sum(r["Impressions"] for r in rows)
-    total_clicks  = sum(r["Clicks"] for r in rows)
-    rows.append({
-        "Platform":    "**Total**",
-        "Spend":       total_spend,
-        "Revenue":     total_rev,
-        "ROAS":        total_rev / total_spend if total_spend else 0,
-        "CPA":         total_spend / total_orders if total_orders else 0,
-        "Orders":      total_orders,
-        "Impressions": total_impr,
-        "Clicks":      total_clicks,
-    })
+    # ── aggregate totals ───────────────────────────────────────────────────
+    def _sum_field(field: str) -> float:
+        return sum(r["s"].get(field, 0) for r in platform_results.values())
 
-    # KPI summary cards
-    target_cpa = proj.get("target_cpa", 0)
-    target_mer = proj.get("target_mer", 0)
-    agg_roas   = total_rev / total_spend if total_spend else 0
-    agg_cpa    = total_spend / total_orders if total_orders else 0
+    total_spend   = _sum_field("spend")
+    total_rev     = _sum_field("revenue")
+    total_orders  = _sum_field("conversions")
+    total_impr    = _sum_field("impressions")
+    total_clicks  = _sum_field("clicks")
+    agg_roas = total_rev  / total_spend  if total_spend  else 0.0
+    agg_cpa  = total_spend / total_orders if total_orders else 0.0
+    agg_ctr  = total_clicks / total_impr * 100 if total_impr else 0.0
+    agg_cpm  = total_spend / total_impr * 1000 if total_impr else 0.0
 
-    cpa_color  = "#3fb950" if (target_cpa and agg_cpa <= target_cpa) else "#f85149" if target_cpa else "#58a6ff"
-    mer_color  = "#3fb950" if (target_mer and agg_roas >= target_mer) else "#f85149" if target_mer else "#58a6ff"
+    # ── KPI summary row ────────────────────────────────────────────────────
+    cpa_color = ("#3fb950" if (target_cpa and agg_cpa <= target_cpa)
+                 else "#f85149" if target_cpa else "#58a6ff")
+    mer_color = ("#3fb950" if (target_mer and agg_roas >= target_mer)
+                 else "#f85149" if target_mer else "#58a6ff")
 
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3, k4, k5 = st.columns(5)
+    _kpi_style = "background:rgba(255,255,255,0.04);border-radius:10px;padding:14px 16px"
+
     with k1:
         st.markdown(f"""
-        <div style='background:rgba(255,255,255,0.04);border-radius:10px;padding:14px 16px'>
+        <div style='{_kpi_style}'>
           <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>Total Spend</div>
           <div style='font-size:22px;font-weight:800;color:#f0f6fc;margin-top:4px'>{_fmt_sar(total_spend)}</div>
         </div>""", unsafe_allow_html=True)
     with k2:
         st.markdown(f"""
-        <div style='background:rgba(255,255,255,0.04);border-radius:10px;padding:14px 16px'>
+        <div style='{_kpi_style}'>
           <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>Revenue</div>
           <div style='font-size:22px;font-weight:800;color:#f0f6fc;margin-top:4px'>{_fmt_sar(total_rev)}</div>
         </div>""", unsafe_allow_html=True)
     with k3:
         st.markdown(f"""
-        <div style='background:rgba(255,255,255,0.04);border-radius:10px;padding:14px 16px'>
-          <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>ROAS</div>
+        <div style='{_kpi_style}'>
+          <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>Overall ROAS</div>
           <div style='font-size:22px;font-weight:800;color:{mer_color};margin-top:4px'>{agg_roas:.2f}×</div>
-          {f"<div style='font-size:10px;color:rgba(255,255,255,0.3)'>Target {target_mer:.1f}×</div>" if target_mer else ""}
+          {f"<div style='font-size:10px;color:rgba(255,255,255,0.3);margin-top:2px'>Target {target_mer:.1f}×</div>" if target_mer else ""}
         </div>""", unsafe_allow_html=True)
     with k4:
         st.markdown(f"""
-        <div style='background:rgba(255,255,255,0.04);border-radius:10px;padding:14px 16px'>
-          <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>CPA</div>
+        <div style='{_kpi_style}'>
+          <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>Overall CPA</div>
           <div style='font-size:22px;font-weight:800;color:{cpa_color};margin-top:4px'>{_fmt_sar(agg_cpa)}</div>
-          {f"<div style='font-size:10px;color:rgba(255,255,255,0.3)'>Target {_fmt_sar(target_cpa)}</div>" if target_cpa else ""}
+          {f"<div style='font-size:10px;color:rgba(255,255,255,0.3);margin-top:2px'>Target {_fmt_sar(target_cpa)}</div>" if target_cpa else ""}
+        </div>""", unsafe_allow_html=True)
+    with k5:
+        st.markdown(f"""
+        <div style='{_kpi_style}'>
+          <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>Total Orders</div>
+          <div style='font-size:22px;font-weight:800;color:#f0f6fc;margin-top:4px'>{_fmt_num(total_orders)}</div>
         </div>""", unsafe_allow_html=True)
 
-    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    # table
+    # ── platform breakdown table ───────────────────────────────────────────
+    st.markdown(
+        "<div style='font-size:11px;font-weight:600;color:rgba(255,255,255,0.35);"
+        "text-transform:uppercase;letter-spacing:1px;margin-bottom:10px'>"
+        "Platform Breakdown</div>",
+        unsafe_allow_html=True
+    )
+
     header_html = """
     <table style='width:100%;border-collapse:collapse;font-size:13px'>
       <thead>
-        <tr style='color:rgba(255,255,255,0.4);text-transform:uppercase;font-size:10px;letter-spacing:0.5px'>
-          <th style='text-align:left;padding:8px 12px'>Platform</th>
-          <th style='text-align:right;padding:8px 12px'>Spend</th>
-          <th style='text-align:right;padding:8px 12px'>Revenue</th>
-          <th style='text-align:right;padding:8px 12px'>ROAS</th>
-          <th style='text-align:right;padding:8px 12px'>CPA</th>
-          <th style='text-align:right;padding:8px 12px'>Orders</th>
-          <th style='text-align:right;padding:8px 12px'>Impressions</th>
-          <th style='text-align:right;padding:8px 12px'>Clicks</th>
+        <tr style='color:rgba(255,255,255,0.4);text-transform:uppercase;font-size:10px;
+                   letter-spacing:0.5px;border-bottom:1px solid rgba(255,255,255,0.08)'>
+          <th style='text-align:left;padding:8px 14px;width:160px'></th>
+          <th style='text-align:right;padding:8px 14px'>Spend</th>
+          <th style='text-align:right;padding:8px 14px'>Revenue</th>
+          <th style='text-align:right;padding:8px 14px'>ROAS</th>
+          <th style='text-align:right;padding:8px 14px'>CPA</th>
+          <th style='text-align:right;padding:8px 14px'>Orders</th>
+          <th style='text-align:right;padding:8px 14px'>CTR</th>
+          <th style='text-align:right;padding:8px 14px'>CPM</th>
         </tr>
       </thead>
       <tbody>
     """
+
     body = ""
-    for i, r in enumerate(rows):
-        is_total = r["Platform"].startswith("**")
-        bg = "rgba(255,255,255,0.06)" if is_total else ("rgba(255,255,255,0.02)" if i % 2 else "transparent")
-        weight = "700" if is_total else "400"
-        name = r["Platform"].replace("**", "")
-        body += f"""
+    for i, (plat, res) in enumerate(platform_results.items()):
+        s    = res["s"]
+        err  = res["err"]
+        color = _PLATFORM_COLORS[plat]
+        label = _PLATFORM_LABELS[plat]
+        bg    = "rgba(255,255,255,0.02)" if i % 2 else "transparent"
+
+        spend_v   = s.get("spend", 0)
+        rev_v     = s.get("revenue", 0)
+        roas_v    = s.get("roas", 0)
+        cpa_v     = s.get("cpa", 0)
+        orders_v  = s.get("conversions", 0)
+        ctr_v     = s.get("ctr", 0)
+        cpm_v     = s.get("cpm", 0)
+
+        indicator = _roas_indicator(roas_v, target_mer)
+
+        if err and res["empty"]:
+            # error state — show error message across columns
+            body += f"""
         <tr style='background:{bg}'>
-          <td style='padding:9px 12px;font-weight:{weight};color:#f0f6fc'>{name}</td>
-          <td style='padding:9px 12px;text-align:right;font-family:monospace'>{_fmt_sar(r["Spend"])}</td>
-          <td style='padding:9px 12px;text-align:right;font-family:monospace'>{_fmt_sar(r["Revenue"])}</td>
-          <td style='padding:9px 12px;text-align:right;font-family:monospace'>{r["ROAS"]:.2f}×</td>
-          <td style='padding:9px 12px;text-align:right;font-family:monospace'>{_fmt_sar(r["CPA"])}</td>
-          <td style='padding:9px 12px;text-align:right;font-family:monospace'>{_fmt_num(r["Orders"])}</td>
-          <td style='padding:9px 12px;text-align:right;font-family:monospace'>{_fmt_num(r["Impressions"])}</td>
-          <td style='padding:9px 12px;text-align:right;font-family:monospace'>{_fmt_num(r["Clicks"])}</td>
+          <td style='padding:10px 14px'>
+            <div style='display:flex;align-items:center'>
+              {indicator}
+              <span style='display:inline-block;width:8px;height:8px;border-radius:50%;
+                           background:{color};margin-right:8px;flex-shrink:0'></span>
+              <span style='font-weight:600;color:#f0f6fc'>{label}</span>
+            </div>
+          </td>
+          <td colspan='7' style='padding:10px 14px;color:rgba(255,107,107,0.8);font-size:11px'>
+            Error: {err}
+          </td>
+        </tr>"""
+        else:
+            roas_display = f"{roas_v:.2f}×" if spend_v else "—"
+            body += f"""
+        <tr style='background:{bg}'>
+          <td style='padding:10px 14px'>
+            <div style='display:flex;align-items:center'>
+              {indicator}
+              <span style='display:inline-block;width:8px;height:8px;border-radius:50%;
+                           background:{color};margin-right:8px;flex-shrink:0'></span>
+              <span style='font-weight:600;color:#f0f6fc'>{label}</span>
+            </div>
+          </td>
+          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:#f0f6fc'>{_fmt_sar(spend_v)}</td>
+          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:#f0f6fc'>{_fmt_sar(rev_v)}</td>
+          <td style='padding:10px 14px;text-align:right;font-family:monospace;
+                     color:{_roas_color(roas_v, target_mer)};font-weight:600'>{roas_display}</td>
+          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:#f0f6fc'>{_fmt_sar(cpa_v)}</td>
+          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:#f0f6fc'>{_fmt_num(orders_v)}</td>
+          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.65)'>{_fmt_pct(ctr_v)}</td>
+          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.65)'>{_fmt_sar(cpm_v)}</td>
+        </tr>"""
+
+    # totals row
+    total_roas_display = f"{agg_roas:.2f}×" if total_spend else "—"
+    body += f"""
+        <tr style='background:rgba(255,255,255,0.055);border-top:1px solid rgba(255,255,255,0.1)'>
+          <td style='padding:11px 14px;font-weight:700;color:#f0f6fc;letter-spacing:0.3px'>
+            <div style='display:flex;align-items:center'>
+              <span style='display:inline-block;width:8px;height:8px;border-radius:2px;
+                           background:rgba(255,255,255,0.3);margin-right:16px;flex-shrink:0'></span>
+              Total
+            </div>
+          </td>
+          <td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(total_spend)}</td>
+          <td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(total_rev)}</td>
+          <td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;
+                     color:{_roas_color(agg_roas, target_mer)}'>{total_roas_display}</td>
+          <td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(agg_cpa)}</td>
+          <td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_num(total_orders)}</td>
+          <td style='padding:11px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.65)'>{_fmt_pct(agg_ctr)}</td>
+          <td style='padding:11px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.65)'>{_fmt_sar(agg_cpm)}</td>
         </tr>"""
 
     st.markdown(
-        f"<div style='background:rgba(255,255,255,0.03);border-radius:10px;overflow:hidden'>"
+        f"<div style='background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);"
+        f"border-radius:12px;overflow:hidden'>"
         f"{header_html}{body}</tbody></table></div>",
         unsafe_allow_html=True
     )
+
+    # legend
+    if target_mer > 0:
+        st.markdown(f"""
+        <div style='margin-top:10px;display:flex;gap:18px;font-size:11px;color:rgba(255,255,255,0.35)'>
+          <span><span style='color:#3fb950'>●</span> ROAS ≥ {target_mer:.1f}× (on target)</span>
+          <span><span style='color:#e3b341'>●</span> ROAS ≥ {target_mer*0.8:.1f}× (near target)</span>
+          <span><span style='color:#f85149'>●</span> ROAS &lt; {target_mer*0.8:.1f}× (below target)</span>
+        </div>""", unsafe_allow_html=True)
+
+
+def _roas_color(roas: float, target_mer: float) -> str:
+    if target_mer <= 0:
+        return "#f0f6fc"
+    if roas >= target_mer:
+        return "#3fb950"
+    if roas >= target_mer * 0.8:
+        return "#e3b341"
+    return "#f85149"
 
 
 # ── card grid ─────────────────────────────────────────────────────────────────
@@ -423,11 +545,11 @@ def _render_cards(projects: list[dict]):
             st.markdown(f"""
             <div style='background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
                         border-radius:14px;padding:18px 20px 14px;margin-bottom:4px'>
-              <div style='font-size:16px;font-weight:700;color:#f0f6fc;margin-bottom:8px'>
+              <div style='font-size:17px;font-weight:700;color:#f0f6fc;margin-bottom:10px'>
                 {proj['name']}
               </div>
               <div style='margin-bottom:12px'>{dots}</div>
-              <div style='display:flex;gap:20px'>
+              <div style='display:flex;gap:24px'>
                 <div>
                   <div style='font-size:9.5px;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.8px'>Target CPA</div>
                   <div style='font-size:14px;font-weight:600;color:#58a6ff'>
@@ -453,7 +575,6 @@ def _render_cards(projects: list[dict]):
 def render_projects_page(start: str, end: str, fetch_google=None):
     projects = load_projects()
 
-    # check if a project is selected
     sel_id = st.session_state.get("selected_project_id")
     if sel_id:
         proj = next((p for p in projects if p["id"] == sel_id), None)
@@ -463,7 +584,6 @@ def render_projects_page(start: str, end: str, fetch_google=None):
         else:
             st.session_state.pop("selected_project_id", None)
 
-    # header row
     hcol, bcol = st.columns([4, 1])
     with hcol:
         st.markdown("""
