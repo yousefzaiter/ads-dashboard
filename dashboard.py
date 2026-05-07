@@ -1540,6 +1540,9 @@ st.session_state.setdefault("meta_selected_adset", None)    # {id, name}
 st.session_state.setdefault("snap_view", "campaigns")
 st.session_state.setdefault("snap_selected_campaign", None)
 st.session_state.setdefault("snap_selected_adset", None)
+st.session_state.setdefault("tiktok_view", "campaigns")
+st.session_state.setdefault("tiktok_selected_campaign", None)
+st.session_state.setdefault("tiktok_selected_adset", None)
 
 # ── Auth (needed early for client list) ───────────────────────────────────────
 try:
@@ -1599,6 +1602,33 @@ if _snap_ready:
         _snap_accounts = fetch_snap_accounts(_snap_token)
     except Exception:
         _snap_accounts = []
+
+# ── TikTok pre-fetch ──────────────────────────────────────────────────────────
+_tiktok_token      = os.getenv("TIKTOK_ACCESS_TOKEN", "")
+_tiktok_advertiser = os.getenv("TIKTOK_ADVERTISER_ID", "")
+_tiktok_ready      = False
+_tiktok_adv_name   = ""
+
+_tt_creds_ok = (
+    _tiktok_token and _tiktok_advertiser
+    and _tiktok_token != "pending" and _tiktok_advertiser != "pending"
+)
+if _tt_creds_ok:
+    try:
+        from tiktok_ads_server import (
+            fetch_tiktok_campaigns, fetch_tiktok_daily,
+            fetch_tiktok_adsets, fetch_tiktok_ads,
+            fetch_tiktok_advertiser_name,
+        )
+        _tiktok_ready = True
+    except Exception:
+        _tiktok_token = ""
+
+if _tiktok_ready:
+    try:
+        _tiktok_adv_name = fetch_tiktok_advertiser_name(_tiktok_token, _tiktok_advertiser)
+    except Exception:
+        _tiktok_adv_name = _tiktok_advertiser
 
 # ── Role helpers ──────────────────────────────────────────────────────────────
 _current_username = st.session_state.get("username", "")
@@ -1693,7 +1723,7 @@ with st.sidebar:
                 st.warning("No Meta accounts found")
                 selected_meta_acct_id   = ""
                 selected_meta_acct_name = ""
-        else:  # Snap Ads
+        elif _active_platform == "🟡  Snap Ads":
             selected_client      = ""
             selected_customer_id = ""
             selected_meta_acct_id   = ""
@@ -1712,6 +1742,24 @@ with st.sidebar:
                 st.warning("No Snap accounts found")
                 selected_snap_acct_id   = ""
                 selected_snap_acct_name = ""
+        else:  # TikTok Ads
+            selected_client         = ""
+            selected_customer_id    = ""
+            selected_meta_acct_id   = ""
+            selected_meta_acct_name = ""
+            selected_snap_acct_id   = ""
+            selected_snap_acct_name = ""
+            if _tiktok_ready:
+                st.markdown(
+                    f"<div style='font-size:10px;font-weight:700;letter-spacing:1px;"
+                    f"color:rgba(255,255,255,0.3);text-transform:uppercase;"
+                    f"margin-bottom:4px'>TIKTOK ADVERTISER</div>"
+                    f"<div style='font-size:13px;color:#f0f6fc;font-weight:600;"
+                    f"padding:6px 0'>{_tiktok_adv_name}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.warning("TikTok not configured — add credentials to .env")
     else:
         assigned_cid  = user_info.get("client_id", "")
         assigned_name = next((n for n, c in clients.items() if c == assigned_cid), _display_name)
@@ -1777,6 +1825,10 @@ with st.sidebar:
             _src_api  = "Snapchat Marketing API v1"
             _src_note = "✓ Token active" if _snap_ready else "✗ Token missing"
             _note_col = "#3fb950" if _snap_ready else "#f85149"
+        elif _active_platform == "⚫  TikTok Ads":
+            _src_api  = "TikTok Marketing API v1.3"
+            _src_note = "✓ Token active" if _tiktok_ready else "✗ Credentials pending"
+            _note_col = "#3fb950" if _tiktok_ready else "#f85149"
         else:
             _src_api  = "Google Ads API v20"
             _src_note = "Auto-refresh every 5 min"
@@ -2178,10 +2230,14 @@ if _is_admin and (_cross_meta_id or _cross_snap_id) and selected_customer_id:
     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
 # ── Platform selector ────────────────────────────────────────────────────────
-_snap_options = ["🔵  Google Ads", "📘  Meta Ads"] + (["🟡  Snap Ads"] if _snap_ready else [])
+_platform_options = (
+    ["🔵  Google Ads", "📘  Meta Ads"]
+    + (["🟡  Snap Ads"] if _snap_ready else [])
+    + ["⚫  TikTok Ads"]
+)
 _platform = st.radio(
     "platform",
-    _snap_options,
+    _platform_options,
     horizontal=True,
     label_visibility="collapsed",
     key="_platform_radio",
@@ -2752,6 +2808,299 @@ if _platform == "🟡  Snap Ads":
             for _, _sadrow in _sdf_ads.sort_values("Cost", ascending=False).iterrows():
                 _sad = ai_decision(_sadrow)
                 st.markdown(campaign_card(_sadrow, _sad), unsafe_allow_html=True)
+
+    st.stop()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TIKTOK ADS
+# ══════════════════════════════════════════════════════════════════════════════
+
+if _platform == "⚫  TikTok Ads":
+    if not _tiktok_ready:
+        st.warning(
+            "TikTok Ads not configured — add "
+            "`TIKTOK_ACCESS_TOKEN` and `TIKTOK_ADVERTISER_ID` to .env"
+        )
+        st.stop()
+
+    _tv  = st.session_state["tiktok_view"]
+    _tsc = st.session_state["tiktok_selected_campaign"]
+    _tsa = st.session_state["tiktok_selected_adset"]
+
+    # ── Breadcrumb ────────────────────────────────────────────────────────────
+    def _tt_bc(text: str, active: bool) -> str:
+        c = "#f0f6fc" if active else "rgba(255,255,255,0.35)"
+        return f"<span style='font-size:13px;font-weight:{'700' if active else '500'};color:{c}'>{text}</span>"
+
+    if _tv == "campaigns":
+        _tbc = _tt_bc("Campaigns", True)
+    elif _tv == "adsets":
+        _tbc = _tt_bc("Campaigns", False) + ' <span style="color:rgba(255,255,255,0.2)">›</span> ' + \
+               _tt_bc(_tsc["name"] if _tsc else "", True)
+    else:
+        _tbc = _tt_bc("Campaigns", False) + ' <span style="color:rgba(255,255,255,0.2)">›</span> ' + \
+               _tt_bc(_tsc["name"] if _tsc else "", False) + \
+               ' <span style="color:rgba(255,255,255,0.2)">›</span> ' + \
+               _tt_bc(_tsa["name"] if _tsa else "", True)
+
+    st.markdown(
+        f'<div style="padding:8px 14px;margin-bottom:12px;font-size:13px;'
+        f'background:#0a0d14;border:1px solid rgba(255,255,255,0.06);border-radius:8px">'
+        f'{_tbc}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TikTok Level 1 — Campaigns
+    # ══════════════════════════════════════════════════════════════════════════
+    if _tv == "campaigns":
+        with st.spinner("جاري تحميل حملات تيك توك..."):
+            try:
+                _tdf_camp  = fetch_tiktok_campaigns(_tiktok_token, _tiktok_advertiser,
+                                                    start_str, end_str, show_paused=show_paused)
+                _tdf_daily = fetch_tiktok_daily(_tiktok_token, _tiktok_advertiser,
+                                                start_str, end_str)
+            except Exception as _te:
+                st.error(f"TikTok API error: {_te}")
+                _tdf_camp  = pd.DataFrame()
+                _tdf_daily = pd.DataFrame()
+
+        if _tdf_camp.empty:
+            st.info("No TikTok campaign data for this date range.")
+        else:
+            _ts    = _tdf_camp["Cost"].sum()
+            _tc    = int(_tdf_camp["Clicks"].sum())
+            _ti    = int(_tdf_camp["Impressions"].sum())
+            _tcv   = _tdf_camp["Conversions"].sum()
+            _trv   = _tdf_camp["Conv. Value"].sum()
+            _tvv   = int(_tdf_camp["Video Views"].sum()) if "Video Views" in _tdf_camp.columns else 0
+            _tctr  = (_tc / _ti * 100) if _ti else 0
+            _tcpc  = (_ts / _tc) if _tc else 0
+            _tcpa  = (_ts / _tcv) if _tcv else 0
+            _troas = (_trv / _ts) if _ts else 0
+            _tvvr  = (_tvv / _ti * 100) if _ti else 0
+
+            # ── KEY METRICS ───────────────────────────────────────────────────
+            st.markdown('<div class="sec-label">TikTok Key Metrics</div>', unsafe_allow_html=True)
+            _tr_sub  = "Excellent ✓" if _troas >= 3 else "Good" if _troas >= 1.5 else "Below target ⚠"
+            _ttcols  = st.columns(9)
+            _ttmetrics = [
+                ("💸", "Total Spend",   fmt_currency(_ts),                    f"{len(_tdf_camp)} campaigns", "#FF0050"),
+                ("👁",  "Impressions",   fmt_number(_ti),                      "Total views",                 "#d2a8ff"),
+                ("👆",  "Clicks",        fmt_number(_tc),                      "Total clicks",                "#3fb950"),
+                ("📊", "CTR",           f"{_tctr:.2f}%",                      "Click-through rate",          "#39c5d0"),
+                ("⚡", "Avg. CPC",      fmt_currency(_tcpc),                  "Cost per click",              "#ffa657"),
+                ("🎯", "Conversions",   f"{_tcv:,.1f}",                       "Tracked conversions",         "#ff6b9d"),
+                ("💰", "CPA",           fmt_currency(_tcpa) if _tcv else "—", "Cost per conversion",         "#e3b341"),
+                ("🎬", "Video Views",   fmt_number(_tvv),                     f"VVR {_tvvr:.1f}%",           "#a5d6ff"),
+                ("📈", "ROAS",          f"{_troas:.2f}×",                     _tr_sub,                       "#3fb950" if _troas >= 3 else "#f85149"),
+            ]
+            for _col, (_icon, _lbl, _val, _sub, _acc) in zip(_ttcols, _ttmetrics):
+                _col.markdown(kpi_card(_icon, _lbl, _val, _sub, _acc), unsafe_allow_html=True)
+
+            # ── ROAS hero ─────────────────────────────────────────────────────
+            _trc  = "#3fb950" if _troas >= 3 else "#58a6ff" if _troas >= 1.5 else "#f0883e" if _troas >= 1 else "#f85149"
+            _trl  = "Excellent" if _troas >= 3 else "Good" if _troas >= 1.5 else "Break-even" if _troas >= 1 else "Below target"
+            st.markdown(f"""
+            <div class="roas-wrap" style="background:linear-gradient(135deg,#160008,#0f0005);
+                 border:1px solid {hex_to_rgba(_trc, 0.2)};">
+              <div>
+                <div style="font-size:10.5px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
+                            color:rgba(255,255,255,0.28);margin-bottom:6px">TikTok ROAS</div>
+                <div style="font-size:58px;font-weight:900;color:{_trc};line-height:1;
+                            letter-spacing:-2.5px;text-shadow:0 0 50px {hex_to_rgba(_trc,0.5)}">
+                  {_troas:.2f}<span style="font-size:28px;opacity:0.7">×</span>
+                </div>
+              </div>
+              <div class="roas-divider"></div>
+              <div style="display:flex;flex-direction:column;gap:14px">
+                <div>
+                  <div class="roas-stat-label">Conv. Value</div>
+                  <div class="roas-stat-value">{fmt_currency(_trv)}</div>
+                </div>
+                <div>
+                  <div class="roas-stat-label">Total Spend</div>
+                  <div class="roas-stat-value">{fmt_currency(_ts)}</div>
+                </div>
+              </div>
+              <div style="margin-left:auto;text-align:right">
+                <div style="font-size:11px;color:rgba(255,255,255,0.25);margin-bottom:4px">Status</div>
+                <div style="font-size:14px;font-weight:700;color:{_trc}">{_trl}</div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── CAMPAIGN INTELLIGENCE ─────────────────────────────────────────
+            _tdf_active = _tdf_camp[_tdf_camp["Status"] == "ENABLED"]
+            _t_strong = len(_tdf_active[_tdf_active.apply(lambda r: ai_decision(r)["tier"] == "strong", axis=1)])
+            _t_mod    = len(_tdf_active[_tdf_active.apply(lambda r: ai_decision(r)["tier"] == "moderate", axis=1)])
+            _t_weak   = len(_tdf_active) - _t_strong - _t_mod
+            st.markdown('<div class="sec-label">TikTok Campaign Intelligence</div>', unsafe_allow_html=True)
+            st.markdown(f"""
+            <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+              <div style="background:rgba(63,185,80,0.1);border:1px solid rgba(63,185,80,0.25);
+                          border-radius:8px;padding:8px 16px;font-size:12px;font-weight:700;color:#3fb950">
+                🟢 Scale: {_t_strong}
+              </div>
+              <div style="background:rgba(210,168,68,0.1);border:1px solid rgba(210,168,68,0.25);
+                          border-radius:8px;padding:8px 16px;font-size:12px;font-weight:700;color:#d29922">
+                🟡 Optimize: {_t_mod}
+              </div>
+              <div style="background:rgba(248,81,73,0.1);border:1px solid rgba(248,81,73,0.25);
+                          border-radius:8px;padding:8px 16px;font-size:12px;font-weight:700;color:#f85149">
+                🔴 Review: {_t_weak}
+              </div>
+              <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
+                          border-radius:8px;padding:8px 16px;font-size:12px;color:rgba(255,255,255,0.4)">
+                📊 Total active: {len(_tdf_active)}
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Sort / filter controls
+            _tt1, _tt2, _tt3 = st.columns([2, 2, 1.5])
+            _t_sort   = _tt1.selectbox("Sort", ["Cost","Clicks","CTR","Impressions","Conversions"],
+                                       label_visibility="collapsed", key="tt_sort")
+            _t_filter = _tt2.selectbox("Filter", ["All","🟢 Scale","🟡 Optimize","🔴 Pause/Fix"],
+                                       label_visibility="collapsed", key="tt_filter")
+            _t_asc    = _tt3.selectbox("Dir", ["↓ Desc","↑ Asc"],
+                                       label_visibility="collapsed", key="tt_dir") == "↑ Asc"
+
+            _t_tier_map  = {"🟢 Scale": "strong", "🟡 Optimize": "moderate", "🔴 Pause/Fix": "weak"}
+            _tdf_sorted  = _tdf_camp.sort_values(_t_sort, ascending=_t_asc)
+            _t_decisions = {i: ai_decision(row) for i, row in _tdf_sorted.iterrows()}
+            _t_any       = False
+            for _ti2, _trow in _tdf_sorted.iterrows():
+                _tdec = _t_decisions[_ti2]
+                if _t_filter != "All" and _tdec["tier"] != _t_tier_map.get(_t_filter, ""):
+                    continue
+                _t_any = True
+                st.markdown(campaign_card(_trow, _tdec), unsafe_allow_html=True)
+                _tc_id   = str(_trow.get("ID", ""))
+                _tc_name = str(_trow.get("Campaign", ""))
+                if _tc_id and st.button("📊 View Ad Groups →", key=f"tt_adset_btn_{_ti2}"):
+                    st.session_state["tiktok_view"]              = "adsets"
+                    st.session_state["tiktok_selected_campaign"] = {"id": _tc_id, "name": _tc_name}
+                    st.session_state["tiktok_selected_adset"]    = None
+                    st.rerun()
+
+            if not _t_any:
+                st.info("No campaigns match this filter.")
+
+            # ── Daily chart ───────────────────────────────────────────────────
+            if not _tdf_daily.empty:
+                st.markdown('<div class="sec-label">TikTok Daily Performance</div>', unsafe_allow_html=True)
+                _tdf_plot = _tdf_daily.copy()
+                _tdf_plot["ROAS"] = _tdf_plot.apply(
+                    lambda r: round(r["Conv. Value"] / r["Cost"], 2) if r["Cost"] > 0 else 0.0, axis=1)
+                _tfig = go.Figure()
+                _tfig.add_trace(go.Scatter(
+                    x=_tdf_plot["Date"], y=_tdf_plot["Cost"], name="Spend",
+                    mode="lines", line=dict(color="#FF0050", width=2.5, shape="spline"),
+                    fill="tozeroy",
+                    fillgradient=dict(type="vertical",
+                        colorscale=[[0,"rgba(255,0,80,0.22)"],[1,"rgba(255,0,80,0)"]]),
+                    yaxis="y1",
+                ))
+                _tfig.add_trace(go.Scatter(
+                    x=_tdf_plot["Date"], y=_tdf_plot["ROAS"], name="ROAS",
+                    mode="lines", line=dict(color="#3fb950", width=1.5, dash="dot", shape="spline"),
+                    yaxis="y2",
+                ))
+                _tfig.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    margin=dict(l=0,r=0,t=10,b=0), height=220,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(color="rgba(255,255,255,0.5)", size=11)),
+                    xaxis=dict(showgrid=False, color="rgba(255,255,255,0.3)"),
+                    yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
+                               color="rgba(255,255,255,0.3)", title="Spend (SAR)"),
+                    yaxis2=dict(overlaying="y", side="right",
+                                color="rgba(255,255,255,0.3)", title="ROAS"),
+                )
+                st.plotly_chart(_tfig, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TikTok Level 2 — Ad Groups
+    # ══════════════════════════════════════════════════════════════════════════
+    elif _tv == "adsets":
+        if st.button("← Back to Campaigns", key="tt_back_to_camps"):
+            st.session_state["tiktok_view"]              = "campaigns"
+            st.session_state["tiktok_selected_campaign"] = None
+            st.rerun()
+
+        _tt_camp_id   = _tsc["id"]
+        _tt_camp_name = _tsc["name"]
+        st.markdown(f'<div class="sec-label">Ad Groups — {_tt_camp_name}</div>', unsafe_allow_html=True)
+
+        with st.spinner("جاري تحميل مجموعات الإعلانات..."):
+            try:
+                _tdf_adsets = fetch_tiktok_adsets(_tiktok_token, _tiktok_advertiser,
+                                                  _tt_camp_id, start_str, end_str)
+            except Exception as _te:
+                st.error(f"TikTok API error: {_te}")
+                _tdf_adsets = pd.DataFrame()
+
+        if _tdf_adsets.empty:
+            st.info(f"No ad group data for '{_tt_camp_name}' in this date range.")
+        else:
+            _tas_s    = _tdf_adsets["Cost"].sum()
+            _tas_c    = int(_tdf_adsets["Clicks"].sum())
+            _tas_i    = int(_tdf_adsets["Impressions"].sum())
+            _tas_cv   = _tdf_adsets["Conversions"].sum()
+            _tas_rv   = _tdf_adsets["Conv. Value"].sum()
+            _tas_roas = round(_tas_rv / _tas_s, 2) if _tas_s else 0.0
+            _tas_ctr  = round(_tas_c / _tas_i * 100, 2) if _tas_i else 0.0
+
+            _tascols = st.columns(6)
+            for _col, (_lbl, _val) in zip(_tascols, [
+                ("Spend",       fmt_currency(_tas_s)),
+                ("Impressions", fmt_number(_tas_i)),
+                ("Clicks",      fmt_number(_tas_c)),
+                ("CTR",         f"{_tas_ctr:.2f}%"),
+                ("Conv.",       f"{_tas_cv:,.1f}"),
+                ("ROAS",        f"{_tas_roas:.2f}×"),
+            ]):
+                _col.metric(_lbl, _val)
+
+            _tas_decisions = {i: ai_decision(row) for i, row in _tdf_adsets.iterrows()}
+            for _tasi, _tasrow in _tdf_adsets.sort_values("Cost", ascending=False).iterrows():
+                _tasd    = _tas_decisions[_tasi]
+                st.markdown(campaign_card(_tasrow, _tasd), unsafe_allow_html=True)
+                _tas_id   = str(_tasrow.get("ID", ""))
+                _tas_name = str(_tasrow.get("Campaign", ""))
+                if _tas_id and st.button("📋 View Ads →", key=f"tt_ads_btn_{_tasi}"):
+                    st.session_state["tiktok_view"]           = "ads"
+                    st.session_state["tiktok_selected_adset"] = {"id": _tas_id, "name": _tas_name}
+                    st.rerun()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TikTok Level 3 — Ads
+    # ══════════════════════════════════════════════════════════════════════════
+    elif _tv == "ads":
+        if st.button("← Back to Ad Groups", key="tt_back_to_adsets"):
+            st.session_state["tiktok_view"]           = "adsets"
+            st.session_state["tiktok_selected_adset"] = None
+            st.rerun()
+
+        _tt_adset_id   = _tsa["id"]
+        _tt_adset_name = _tsa["name"]
+        st.markdown(f'<div class="sec-label">Ads — {_tt_adset_name}</div>', unsafe_allow_html=True)
+
+        with st.spinner("جاري تحميل الإعلانات..."):
+            try:
+                _tdf_ads = fetch_tiktok_ads(_tiktok_token, _tiktok_advertiser,
+                                            _tt_adset_id, start_str, end_str)
+            except Exception as _te:
+                st.error(f"TikTok API error: {_te}")
+                _tdf_ads = pd.DataFrame()
+
+        if _tdf_ads.empty:
+            st.info(f"No ad data for '{_tt_adset_name}' in this date range.")
+        else:
+            for _, _tadrow in _tdf_ads.sort_values("Cost", ascending=False).iterrows():
+                _tad = ai_decision(_tadrow)
+                st.markdown(campaign_card(_tadrow, _tad), unsafe_allow_html=True)
 
     st.stop()
 
