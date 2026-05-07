@@ -2623,7 +2623,7 @@ if _platform == "🟡  Snap Ads":
                     continue
                 _s_any = True
                 st.markdown(campaign_card(_srow, _sdec), unsafe_allow_html=True)
-                _sc_id   = str(_srow.get("Campaign ID", ""))
+                _sc_id   = str(_srow.get("ID", ""))
                 _sc_name = str(_srow.get("Campaign", ""))
                 if _sc_id and st.button("📊 View Ad Squads →", key=f"snap_adset_btn_{_si2}"):
                     st.session_state["snap_view"]              = "adsets"
