@@ -87,19 +87,15 @@ def _fmt_pct(v: float) -> str:
     return f"{v:.2f}%"
 
 
-def _roas_indicator(roas: float, target_mer: float) -> str:
-    """Returns a colored circle HTML. Green/yellow/red vs target, grey if no target."""
+def _roas_ind_color(roas: float, target_mer: float) -> str:
+    """Returns the hex/rgba color for the ROAS status indicator dot."""
     if target_mer <= 0:
-        color = "rgba(255,255,255,0.25)"
-    elif roas >= target_mer:
-        color = "#3fb950"       # green
-    elif roas >= target_mer * 0.8:
-        color = "#e3b341"       # yellow
-    else:
-        color = "#f85149"       # red
-    return (f"<span style='display:inline-block;width:10px;height:10px;"
-            f"border-radius:50%;background:{color};margin-right:8px;"
-            f"flex-shrink:0;margin-top:2px'></span>")
+        return "rgba(255,255,255,0.2)"
+    if roas >= target_mer:
+        return "#3fb950"
+    if roas >= target_mer * 0.8:
+        return "#e3b341"
+    return "#f85149"
 
 
 # ── new-project dialog ────────────────────────────────────────────────────────
@@ -237,13 +233,21 @@ def _fetch_platform_df(platform: str, proj: dict, start: str, end: str,
             return pd.DataFrame(), None
         try:
             from meta_ads_server import fetch_meta_campaigns
+            from token_manager import check_token_info
             token = os.getenv("META_ACCESS_TOKEN", "")
             if not token:
-                return pd.DataFrame(), "No META_ACCESS_TOKEN"
+                return pd.DataFrame(), "No META_ACCESS_TOKEN in .env"
+            # quick validity check before making the campaigns call
+            info = check_token_info(token)
+            if not info.get("is_valid"):
+                return pd.DataFrame(), "Token expired — generate a new token at developers.facebook.com/tools/explorer and update META_ACCESS_TOKEN in .env"
             df = fetch_meta_campaigns(token, acct, start, end)
             return df, None
         except Exception as e:
-            return pd.DataFrame(), str(e)[:80]
+            err = str(e)
+            if "Session has expired" in err or "OAuthException" in err or "190" in err:
+                return pd.DataFrame(), "Token expired — update META_ACCESS_TOKEN in .env"
+            return pd.DataFrame(), err[:120]
 
     if platform == "snap":
         acct = plat.get("ad_account_id", "").strip()
@@ -299,7 +303,6 @@ def _summarise(df: pd.DataFrame) -> dict:
 # ── project detail view ───────────────────────────────────────────────────────
 
 def _render_project_detail(proj: dict, start: str, end: str, fetch_google=None):
-    # back + edit row
     back_col, edit_col, _ = st.columns([2, 2, 6])
     with back_col:
         if st.button("← Back", key="proj_back"):
@@ -313,28 +316,24 @@ def _render_project_detail(proj: dict, start: str, end: str, fetch_google=None):
     target_cpa = float(proj.get("target_cpa", 0))
     target_mer = float(proj.get("target_mer", 0))
 
-    st.markdown(f"""
-    <div style='margin:8px 0 20px'>
-      <div style='font-size:28px;font-weight:900;color:#f0f6fc;letter-spacing:-1px'>
-        {proj['name']}
-      </div>
-      <div style='font-size:12px;color:rgba(255,255,255,0.35);margin-top:6px;display:flex;align-items:center;gap:6px'>
-        {_platform_dots(plat_cfg)}
-        <span>Cross-platform · {start} → {end}</span>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='margin:8px 0 20px'>"
+        f"<div style='font-size:28px;font-weight:900;color:#f0f6fc;letter-spacing:-1px'>{proj['name']}</div>"
+        f"<div style='font-size:12px;color:rgba(255,255,255,0.35);margin-top:6px'>"
+        f"{_platform_dots(plat_cfg)} &nbsp;Cross-platform &middot; {start} &rarr; {end}"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
 
     # ── fetch data for each connected platform ─────────────────────────────
-    platform_results: dict[str, dict] = {}   # platform → {"s": summary, "err": str|None}
+    platform_results: dict[str, dict] = {}
 
     for plat in ["google", "meta", "snap", "tiktok"]:
         acct = plat_cfg.get(plat, {})
         ids  = list(acct.values()) if isinstance(acct, dict) else []
         if not any(str(v).strip() for v in ids):
             continue
-        label = _PLATFORM_LABELS[plat]
-        with st.spinner(f"Loading {label}…"):
+        with st.spinner(f"Loading {_PLATFORM_LABELS[plat]}…"):
             df, err = _fetch_platform_df(plat, proj, start, end, fetch_google=fetch_google)
         platform_results[plat] = {"s": _summarise(df), "err": err, "empty": df.empty}
 
@@ -343,18 +342,18 @@ def _render_project_detail(proj: dict, start: str, end: str, fetch_google=None):
         return
 
     # ── aggregate totals ───────────────────────────────────────────────────
-    def _sum_field(field: str) -> float:
+    def _sum(field: str) -> float:
         return sum(r["s"].get(field, 0) for r in platform_results.values())
 
-    total_spend   = _sum_field("spend")
-    total_rev     = _sum_field("revenue")
-    total_orders  = _sum_field("conversions")
-    total_impr    = _sum_field("impressions")
-    total_clicks  = _sum_field("clicks")
-    agg_roas = total_rev  / total_spend  if total_spend  else 0.0
+    total_spend  = _sum("spend")
+    total_rev    = _sum("revenue")
+    total_orders = _sum("conversions")
+    total_impr   = _sum("impressions")
+    total_clicks = _sum("clicks")
+    agg_roas = total_rev   / total_spend  if total_spend  else 0.0
     agg_cpa  = total_spend / total_orders if total_orders else 0.0
-    agg_ctr  = total_clicks / total_impr * 100 if total_impr else 0.0
-    agg_cpm  = total_spend / total_impr * 1000 if total_impr else 0.0
+    agg_ctr  = total_clicks / total_impr * 100  if total_impr else 0.0
+    agg_cpm  = total_spend  / total_impr * 1000 if total_impr else 0.0
 
     # ── KPI summary row ────────────────────────────────────────────────────
     cpa_color = ("#3fb950" if (target_cpa and agg_cpa <= target_cpa)
@@ -363,161 +362,136 @@ def _render_project_detail(proj: dict, start: str, end: str, fetch_google=None):
                  else "#f85149" if target_mer else "#58a6ff")
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    _kpi_style = "background:rgba(255,255,255,0.04);border-radius:10px;padding:14px 16px"
+    _ks = "background:rgba(255,255,255,0.04);border-radius:10px;padding:14px 16px;min-height:72px"
+    _lbl = "font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px"
+    _val = "font-size:22px;font-weight:800;margin-top:4px"
+    _sub = "font-size:10px;color:rgba(255,255,255,0.3);margin-top:2px"
 
     with k1:
-        st.markdown(f"""
-        <div style='{_kpi_style}'>
-          <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>Total Spend</div>
-          <div style='font-size:22px;font-weight:800;color:#f0f6fc;margin-top:4px'>{_fmt_sar(total_spend)}</div>
-        </div>""", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='{_ks}'><div style='{_lbl}'>Total Spend</div>"
+            f"<div style='{_val};color:#f0f6fc'>{_fmt_sar(total_spend)}</div></div>",
+            unsafe_allow_html=True)
     with k2:
-        st.markdown(f"""
-        <div style='{_kpi_style}'>
-          <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>Revenue</div>
-          <div style='font-size:22px;font-weight:800;color:#f0f6fc;margin-top:4px'>{_fmt_sar(total_rev)}</div>
-        </div>""", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='{_ks}'><div style='{_lbl}'>Revenue</div>"
+            f"<div style='{_val};color:#f0f6fc'>{_fmt_sar(total_rev)}</div></div>",
+            unsafe_allow_html=True)
     with k3:
-        st.markdown(f"""
-        <div style='{_kpi_style}'>
-          <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>Overall ROAS</div>
-          <div style='font-size:22px;font-weight:800;color:{mer_color};margin-top:4px'>{agg_roas:.2f}×</div>
-          {f"<div style='font-size:10px;color:rgba(255,255,255,0.3);margin-top:2px'>Target {target_mer:.1f}×</div>" if target_mer else ""}
-        </div>""", unsafe_allow_html=True)
+        tgt_line = f"<div style='{_sub}'>Target {target_mer:.1f}&times;</div>" if target_mer else ""
+        st.markdown(
+            f"<div style='{_ks}'><div style='{_lbl}'>Overall ROAS</div>"
+            f"<div style='{_val};color:{mer_color}'>{agg_roas:.2f}&times;</div>{tgt_line}</div>",
+            unsafe_allow_html=True)
     with k4:
-        st.markdown(f"""
-        <div style='{_kpi_style}'>
-          <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>Overall CPA</div>
-          <div style='font-size:22px;font-weight:800;color:{cpa_color};margin-top:4px'>{_fmt_sar(agg_cpa)}</div>
-          {f"<div style='font-size:10px;color:rgba(255,255,255,0.3);margin-top:2px'>Target {_fmt_sar(target_cpa)}</div>" if target_cpa else ""}
-        </div>""", unsafe_allow_html=True)
+        tgt_line = f"<div style='{_sub}'>Target {_fmt_sar(target_cpa)}</div>" if target_cpa else ""
+        st.markdown(
+            f"<div style='{_ks}'><div style='{_lbl}'>Overall CPA</div>"
+            f"<div style='{_val};color:{cpa_color}'>{_fmt_sar(agg_cpa)}</div>{tgt_line}</div>",
+            unsafe_allow_html=True)
     with k5:
-        st.markdown(f"""
-        <div style='{_kpi_style}'>
-          <div style='font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px'>Total Orders</div>
-          <div style='font-size:22px;font-weight:800;color:#f0f6fc;margin-top:4px'>{_fmt_num(total_orders)}</div>
-        </div>""", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='{_ks}'><div style='{_lbl}'>Total Orders</div>"
+            f"<div style='{_val};color:#f0f6fc'>{_fmt_num(total_orders)}</div></div>",
+            unsafe_allow_html=True)
 
     st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    # ── platform breakdown table ───────────────────────────────────────────
-    st.markdown(
-        "<div style='font-size:11px;font-weight:600;color:rgba(255,255,255,0.35);"
-        "text-transform:uppercase;letter-spacing:1px;margin-bottom:10px'>"
-        "Platform Breakdown</div>",
-        unsafe_allow_html=True
-    )
-
-    header_html = """
-    <table style='width:100%;border-collapse:collapse;font-size:13px'>
-      <thead>
-        <tr style='color:rgba(255,255,255,0.4);text-transform:uppercase;font-size:10px;
-                   letter-spacing:0.5px;border-bottom:1px solid rgba(255,255,255,0.08)'>
-          <th style='text-align:left;padding:8px 14px;width:160px'></th>
-          <th style='text-align:right;padding:8px 14px'>Spend</th>
-          <th style='text-align:right;padding:8px 14px'>Revenue</th>
-          <th style='text-align:right;padding:8px 14px'>ROAS</th>
-          <th style='text-align:right;padding:8px 14px'>CPA</th>
-          <th style='text-align:right;padding:8px 14px'>Orders</th>
-          <th style='text-align:right;padding:8px 14px'>CTR</th>
-          <th style='text-align:right;padding:8px 14px'>CPM</th>
-        </tr>
-      </thead>
-      <tbody>
-    """
-
-    body = ""
+    # ── platform breakdown table — rendered via st.html() ─────────────────
+    # st.markdown strips complex inline styles in Streamlit ≥1.31; st.html()
+    # renders the content as-is inside an auto-sized sandboxed element.
+    rows_html = ""
     for i, (plat, res) in enumerate(platform_results.items()):
-        s    = res["s"]
-        err  = res["err"]
-        color = _PLATFORM_COLORS[plat]
-        label = _PLATFORM_LABELS[plat]
-        bg    = "rgba(255,255,255,0.02)" if i % 2 else "transparent"
+        s      = res["s"]
+        err    = res["err"]
+        dot_c  = _PLATFORM_COLORS[plat]
+        label  = _PLATFORM_LABELS[plat]
+        bg     = "rgba(255,255,255,0.02)" if i % 2 else "transparent"
+        ind_c  = _roas_ind_color(s.get("roas", 0), target_mer)
 
-        spend_v   = s.get("spend", 0)
-        rev_v     = s.get("revenue", 0)
-        roas_v    = s.get("roas", 0)
-        cpa_v     = s.get("cpa", 0)
-        orders_v  = s.get("conversions", 0)
-        ctr_v     = s.get("ctr", 0)
-        cpm_v     = s.get("cpm", 0)
-
-        indicator = _roas_indicator(roas_v, target_mer)
+        ind_dot  = (f"<span style='display:inline-block;width:9px;height:9px;border-radius:50%;"
+                    f"background:{ind_c};margin-right:6px;flex-shrink:0'></span>")
+        plat_dot = (f"<span style='display:inline-block;width:8px;height:8px;border-radius:50%;"
+                    f"background:{dot_c};margin-right:7px;flex-shrink:0'></span>")
+        name_cell = (f"<td style='padding:10px 14px'><div style='display:flex;align-items:center'>"
+                     f"{ind_dot}{plat_dot}"
+                     f"<span style='font-weight:600;color:#f0f6fc'>{label}</span></div></td>")
 
         if err and res["empty"]:
-            # error state — show error message across columns
-            body += f"""
-        <tr style='background:{bg}'>
-          <td style='padding:10px 14px'>
-            <div style='display:flex;align-items:center'>
-              {indicator}
-              <span style='display:inline-block;width:8px;height:8px;border-radius:50%;
-                           background:{color};margin-right:8px;flex-shrink:0'></span>
-              <span style='font-weight:600;color:#f0f6fc'>{label}</span>
-            </div>
-          </td>
-          <td colspan='7' style='padding:10px 14px;color:rgba(255,107,107,0.8);font-size:11px'>
-            Error: {err}
-          </td>
-        </tr>"""
+            rows_html += (f"<tr style='background:{bg}'>{name_cell}"
+                          f"<td colspan='7' style='padding:10px 14px;color:#ff6b6b;font-size:11px'>"
+                          f"Error: {err}</td></tr>")
         else:
-            roas_display = f"{roas_v:.2f}×" if spend_v else "—"
-            body += f"""
-        <tr style='background:{bg}'>
-          <td style='padding:10px 14px'>
-            <div style='display:flex;align-items:center'>
-              {indicator}
-              <span style='display:inline-block;width:8px;height:8px;border-radius:50%;
-                           background:{color};margin-right:8px;flex-shrink:0'></span>
-              <span style='font-weight:600;color:#f0f6fc'>{label}</span>
-            </div>
-          </td>
-          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:#f0f6fc'>{_fmt_sar(spend_v)}</td>
-          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:#f0f6fc'>{_fmt_sar(rev_v)}</td>
-          <td style='padding:10px 14px;text-align:right;font-family:monospace;
-                     color:{_roas_color(roas_v, target_mer)};font-weight:600'>{roas_display}</td>
-          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:#f0f6fc'>{_fmt_sar(cpa_v)}</td>
-          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:#f0f6fc'>{_fmt_num(orders_v)}</td>
-          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.65)'>{_fmt_pct(ctr_v)}</td>
-          <td style='padding:10px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.65)'>{_fmt_sar(cpm_v)}</td>
-        </tr>"""
+            sv   = s.get("spend", 0)
+            rv   = s.get("revenue", 0)
+            rv_  = s.get("roas", 0)
+            cv   = s.get("cpa", 0)
+            ov   = s.get("conversions", 0)
+            tv   = s.get("ctr", 0)
+            pv   = s.get("cpm", 0)
+            rc   = _roas_color(rv_, target_mer)
+            rd   = f"{rv_:.2f}&times;" if sv else "&mdash;"
+            def _td(val, extra=""):
+                return f"<td style='padding:10px 14px;text-align:right;font-family:monospace;color:#f0f6fc{extra}'>{val}</td>"
+            def _td_dim(val):
+                return f"<td style='padding:10px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.55)'>{val}</td>"
+            rows_html += (
+                f"<tr style='background:{bg}'>{name_cell}"
+                + _td(_fmt_sar(sv)) + _td(_fmt_sar(rv))
+                + f"<td style='padding:10px 14px;text-align:right;font-family:monospace;color:{rc};font-weight:600'>{rd}</td>"
+                + _td(_fmt_sar(cv)) + _td(_fmt_num(ov))
+                + _td_dim(_fmt_pct(tv)) + _td_dim(_fmt_sar(pv))
+                + "</tr>"
+            )
 
-    # totals row
-    total_roas_display = f"{agg_roas:.2f}×" if total_spend else "—"
-    body += f"""
-        <tr style='background:rgba(255,255,255,0.055);border-top:1px solid rgba(255,255,255,0.1)'>
-          <td style='padding:11px 14px;font-weight:700;color:#f0f6fc;letter-spacing:0.3px'>
-            <div style='display:flex;align-items:center'>
-              <span style='display:inline-block;width:8px;height:8px;border-radius:2px;
-                           background:rgba(255,255,255,0.3);margin-right:16px;flex-shrink:0'></span>
-              Total
-            </div>
-          </td>
-          <td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(total_spend)}</td>
-          <td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(total_rev)}</td>
-          <td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;
-                     color:{_roas_color(agg_roas, target_mer)}'>{total_roas_display}</td>
-          <td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(agg_cpa)}</td>
-          <td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_num(total_orders)}</td>
-          <td style='padding:11px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.65)'>{_fmt_pct(agg_ctr)}</td>
-          <td style='padding:11px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.65)'>{_fmt_sar(agg_cpm)}</td>
-        </tr>"""
-
-    st.markdown(
-        f"<div style='background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);"
-        f"border-radius:12px;overflow:hidden'>"
-        f"{header_html}{body}</tbody></table></div>",
-        unsafe_allow_html=True
+    total_roas_d = f"{agg_roas:.2f}&times;" if total_spend else "&mdash;"
+    total_rc     = _roas_color(agg_roas, target_mer)
+    rows_html += (
+        f"<tr style='background:rgba(255,255,255,0.055);border-top:1px solid rgba(255,255,255,0.1)'>"
+        f"<td style='padding:11px 14px'><div style='display:flex;align-items:center'>"
+        f"<span style='display:inline-block;width:9px;height:9px;border-radius:2px;"
+        f"background:rgba(255,255,255,0.25);margin-right:13px'></span>"
+        f"<span style='font-weight:700;color:#f0f6fc'>Total</span></div></td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(total_spend)}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(total_rev)}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:{total_rc}'>{total_roas_d}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_sar(agg_cpa)}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;font-weight:700;color:#f0f6fc'>{_fmt_num(total_orders)}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.55)'>{_fmt_pct(agg_ctr)}</td>"
+        f"<td style='padding:11px 14px;text-align:right;font-family:monospace;color:rgba(255,255,255,0.55)'>{_fmt_sar(agg_cpm)}</td>"
+        f"</tr>"
     )
 
-    # legend
+    table_html = (
+        "<div style='background:#161b22;border:1px solid rgba(255,255,255,0.07);"
+        "border-radius:12px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,sans-serif'>"
+        "<table style='width:100%;border-collapse:collapse;font-size:13px'>"
+        "<thead><tr style='color:rgba(255,255,255,0.4);text-transform:uppercase;"
+        "font-size:10px;letter-spacing:0.5px;border-bottom:1px solid rgba(255,255,255,0.08)'>"
+        "<th style='text-align:left;padding:8px 14px;width:170px'></th>"
+        "<th style='text-align:right;padding:8px 14px'>Spend</th>"
+        "<th style='text-align:right;padding:8px 14px'>Revenue</th>"
+        "<th style='text-align:right;padding:8px 14px'>ROAS</th>"
+        "<th style='text-align:right;padding:8px 14px'>CPA</th>"
+        "<th style='text-align:right;padding:8px 14px'>Orders</th>"
+        "<th style='text-align:right;padding:8px 14px'>CTR</th>"
+        "<th style='text-align:right;padding:8px 14px'>CPM</th>"
+        "</tr></thead>"
+        f"<tbody>{rows_html}</tbody>"
+        "</table></div>"
+    )
+    st.html(table_html)
+
     if target_mer > 0:
-        st.markdown(f"""
-        <div style='margin-top:10px;display:flex;gap:18px;font-size:11px;color:rgba(255,255,255,0.35)'>
-          <span><span style='color:#3fb950'>●</span> ROAS ≥ {target_mer:.1f}× (on target)</span>
-          <span><span style='color:#e3b341'>●</span> ROAS ≥ {target_mer*0.8:.1f}× (near target)</span>
-          <span><span style='color:#f85149'>●</span> ROAS &lt; {target_mer*0.8:.1f}× (below target)</span>
-        </div>""", unsafe_allow_html=True)
+        hi = target_mer
+        lo = target_mer * 0.8
+        st.markdown(
+            f"<div style='margin-top:8px;font-size:11px;color:rgba(255,255,255,0.35)'>"
+            f"<span style='color:#3fb950'>&#9679;</span> ROAS &ge; {hi:.1f}&times; &nbsp;"
+            f"<span style='color:#e3b341'>&#9679;</span> ROAS &ge; {lo:.1f}&times; &nbsp;"
+            f"<span style='color:#f85149'>&#9679;</span> ROAS &lt; {lo:.1f}&times;</div>",
+            unsafe_allow_html=True,
+        )
 
 
 def _roas_color(roas: float, target_mer: float) -> str:
