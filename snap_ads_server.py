@@ -30,29 +30,6 @@ _STAT_FIELDS = ",".join([
 ])
 
 
-# ── Low-level request ─────────────────────────────────────────────────────────
-
-def _get(path: str, token: str, params: dict | None = None) -> dict:
-    resp = requests.get(
-        f"{SNAP_API}{path}",
-        headers={"Authorization": f"Bearer {token}"},
-        params=params or {},
-        timeout=20,
-    )
-    if resp.status_code == 401:
-        raise RuntimeError("TOKEN_EXPIRED")
-    if resp.status_code != 200:
-        raise RuntimeError(f"Snap API {resp.status_code}: {resp.text[:300]}")
-    return resp.json()
-
-
-def _show_token_error() -> None:
-    st.error(
-        "🔒 انتهت صلاحية التوكن لـ Snapchat.  "
-        "شغّل `python3 snap_auth.py` مجدداً للحصول على توكن جديد."
-    )
-
-
 # ── Token management ──────────────────────────────────────────────────────────
 
 def get_snap_token() -> str:
@@ -60,7 +37,7 @@ def get_snap_token() -> str:
 
 
 def refresh_snap_token() -> str | None:
-    """Exchange refresh_token for a new access_token and save to .env."""
+    """Exchange refresh_token for a new access_token and persist to .env."""
     client_id     = os.getenv("SNAP_CLIENT_ID", "")
     client_secret = os.getenv("SNAP_CLIENT_SECRET", "")
     refresh_token = os.getenv("SNAP_REFRESH_TOKEN", "")
@@ -69,16 +46,20 @@ def refresh_snap_token() -> str | None:
         return None
 
     creds = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-    resp  = requests.post(
-        TOKEN_URL,
-        headers={
-            "Authorization": f"Basic {creds}",
-            "Content-Type":  "application/x-www-form-urlencoded",
-        },
-        data={"grant_type": "refresh_token", "refresh_token": refresh_token},
-        timeout=15,
-    )
-    data = resp.json()
+    try:
+        resp = requests.post(
+            TOKEN_URL,
+            headers={
+                "Authorization": f"Basic {creds}",
+                "Content-Type":  "application/x-www-form-urlencoded",
+            },
+            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+            timeout=15,
+        )
+        data = resp.json()
+    except Exception:
+        return None
+
     if "access_token" not in data:
         return None
 
@@ -95,6 +76,42 @@ def refresh_snap_token() -> str | None:
     os.environ["SNAP_ACCESS_TOKEN"]  = new_access
     os.environ["SNAP_REFRESH_TOKEN"] = new_refresh
     return new_access
+
+
+# ── Low-level request ─────────────────────────────────────────────────────────
+
+def _get(path: str, token: str, params: dict | None = None) -> dict:
+    """Make a GET request, auto-refreshing the token once on 401."""
+    resp = requests.get(
+        f"{SNAP_API}{path}",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params or {},
+        timeout=20,
+    )
+    if resp.status_code == 401:
+        # Token expired — try refresh once
+        new_token = refresh_snap_token()
+        if new_token:
+            resp = requests.get(
+                f"{SNAP_API}{path}",
+                headers={"Authorization": f"Bearer {new_token}"},
+                params=params or {},
+                timeout=20,
+            )
+            if resp.status_code == 401:
+                raise RuntimeError("TOKEN_EXPIRED")
+        else:
+            raise RuntimeError("TOKEN_EXPIRED")
+    if resp.status_code != 200:
+        raise RuntimeError(f"Snap API {resp.status_code}: {resp.text[:300]}")
+    return resp.json()
+
+
+def _show_token_error() -> None:
+    st.error(
+        "🔒 انتهت صلاحية التوكن لـ Snapchat.  "
+        "شغّل `python3 snap_auth.py` مجدداً للحصول على توكن جديد."
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
