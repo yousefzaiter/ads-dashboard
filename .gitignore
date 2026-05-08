@@ -60,3 +60,5 @@ site/
 google_ads_token.json
 
 uv.lock
+.env.save
+google-ads.yaml
