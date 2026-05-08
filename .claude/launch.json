@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ads-dashboard-local",
+      "runtimeExecutable": "streamlit",
+      "runtimeArgs": ["run", "dashboard.py", "--logger.level=warning", "--client.showErrorDetails=false"],
+      "port": 8501
+    }
+  ]
+}
