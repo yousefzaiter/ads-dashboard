@@ -371,3 +371,157 @@ def fetch_meta_ads_list(token: str, adset_id: str, start: str, end: str) -> pd.D
         })
 
     return pd.DataFrame(records)
+
+
+# ── All ads for Creative Analysis page ───────────────────────────────────────
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_meta_all_ads(token: str, account_id: str, start: str, end: str) -> pd.DataFrame:
+    """
+    Ad-level data for the entire Meta ad account.
+
+    Strategy:
+      1. List ALL ads from /{account_id}/ads (with effective_status + creative).
+         This includes ads with NO spend in the period — so all running ads show.
+      2. Fetch insights at ad-level for the date range, build {ad_id: metrics} dict.
+      3. Iterate over the ads list (not insights), merge metrics from the dict.
+         Ads with no insights data show with zeros.
+
+    Filters out ARCHIVED/DELETED to keep volume manageable.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    # ── Both calls in parallel — saves one round-trip ─────────────────────────
+    def _fetch_ads_list():
+        try:
+            # First try with creative field expansion
+            try:
+                return _get(
+                    f"/{account_id}/ads",
+                    token,
+                    {
+                        "fields": ("id,name,effective_status,adset_id,adset_name,"
+                                   "campaign_id,campaign_name,"
+                                   "creative{thumbnail_url,image_url,object_story_spec}"),
+                        "limit":  500,
+                        # Only ads that are currently active or paused — not archived/deleted
+                        "filtering": '[{"field":"effective_status","operator":"IN",'
+                                     '"value":["ACTIVE","PAUSED","CAMPAIGN_PAUSED",'
+                                     '"ADSET_PAUSED","DISAPPROVED","PENDING_REVIEW"]}]',
+                    },
+                )
+            except RuntimeError as e:
+                if "500" in str(e) or "reduce" in str(e).lower():
+                    # If request too large, fetch without creative field
+                    return _get(
+                        f"/{account_id}/ads",
+                        token,
+                        {
+                            "fields": ("id,name,effective_status,adset_id,adset_name,"
+                                       "campaign_id,campaign_name"),
+                            "limit":  500,
+                            "filtering": '[{"field":"effective_status","operator":"IN",'
+                                         '"value":["ACTIVE","PAUSED","CAMPAIGN_PAUSED",'
+                                         '"ADSET_PAUSED","DISAPPROVED","PENDING_REVIEW"]}]',
+                        },
+                    )
+                else:
+                    raise
+        except Exception:
+            return {"data": []}
+
+    def _fetch_insights():
+        try:
+            return _get(
+                f"/{account_id}/insights",
+                token,
+                {
+                    "fields": ("ad_id,spend,impressions,clicks,ctr,cpc,"
+                               "reach,frequency,actions,action_values"),
+                    "level":  "ad",
+                    "time_range": f'{{"since":"{start}","until":"{end}"}}',
+                    "limit":  500,
+                },
+            )
+        except Exception:
+            return {"data": []}
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_ads      = ex.submit(_fetch_ads_list)
+        f_insights = ex.submit(_fetch_insights)
+        ads_resp   = f_ads.result()
+        ins_resp   = f_insights.result()
+
+    ad_rows = ads_resp.get("data", [])
+    if not ad_rows:
+        return pd.DataFrame()
+
+    # Build insights lookup: ad_id → metrics
+    ins_map: dict[str, dict] = {}
+    for row in ins_resp.get("data", []):
+        aid = row.get("ad_id", "")
+        if aid:
+            ins_map[aid] = row
+
+    # Build records — iterate over ads list so ALL active ads appear
+    records = []
+    for ad in ad_rows:
+        ad_id      = ad.get("id", "")
+        eff_status = ad.get("effective_status", "PAUSED")
+        # ACTIVE = currently delivering → ENABLED for filter
+        status = "ENABLED" if eff_status == "ACTIVE" else "PAUSED"
+
+        # Extract creative thumbnail (try multiple fields for different ad types)
+        creative = ad.get("creative", {}) or {}
+        url = (creative.get("thumbnail_url")
+               or creative.get("image_url")
+               or "")
+        if not url:
+            spec = creative.get("object_story_spec", {}) or {}
+            url = (spec.get("link_data", {}).get("picture")
+                   or spec.get("link_data", {}).get("image_url")
+                   or spec.get("video_data", {}).get("image_url")
+                   or "")
+
+        # Look up insights for this ad
+        ins = ins_map.get(ad_id, {})
+        spend       = float(ins.get("spend", 0) or 0)
+        impressions = int(ins.get("impressions", 0) or 0)
+        clicks      = int(ins.get("clicks", 0) or 0)
+        ctr         = float(ins.get("ctr", 0) or 0)
+        cpc         = float(ins.get("cpc", 0) or 0)
+        reach       = int(ins.get("reach", 0) or 0)
+        frequency   = float(ins.get("frequency", 0) or 0)
+        actions     = ins.get("actions", [])
+        action_vals = ins.get("action_values", [])
+        conversions = _extract_action(actions, _PURCHASE_TYPES)
+        conv_value  = _extract_action(action_vals, _PURCHASE_TYPES)
+        roas        = round(conv_value / spend, 2)         if spend > 0       else 0.0
+        cpa         = round(spend / conversions, 2)        if conversions > 0 else 0.0
+        cpm         = round(spend / impressions * 1000, 2) if impressions > 0 else 0.0
+
+        records.append({
+            "ID":            ad_id,
+            "Campaign":      ad.get("name", ""),
+            "Ad Set Name":   ad.get("adset_name", ""),
+            "Ad Set ID":     ad.get("adset_id", ""),
+            "Campaign Name": ad.get("campaign_name", ""),
+            "Campaign ID":   ad.get("campaign_id", ""),
+            "Status":        status,
+            "Type":          "META_AD",
+            "Impressions":   impressions,
+            "Clicks":        clicks,
+            "Cost":          round(spend, 2),
+            "CTR":           round(ctr, 4),
+            "Avg CPC":       round(cpc, 2),
+            "Conversions":   round(conversions, 1),
+            "Conv. Value":   round(conv_value, 2),
+            "CPA":           cpa,
+            "ROAS":          roas,
+            "Reach":         reach,
+            "Frequency":     frequency,
+            "CPM":           cpm,
+            "thumbnail_url": url,
+        })
+
+    return pd.DataFrame(records)
