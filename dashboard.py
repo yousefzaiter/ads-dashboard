@@ -880,24 +880,40 @@ def mask_name(name: str, show: bool) -> str:
 
 # ── Google Ads query ──────────────────────────────────────────────────────────
 def gaql(query: str, customer_id: str, token: str, dev_token: str, mcc_id: str) -> list:
-    mcc_id = mcc_id.replace("-", "").strip()
+    mcc_id      = mcc_id.replace("-", "").strip()
     customer_id = customer_id.replace("-", "").strip()
     url = f"https://googleads.googleapis.com/v20/customers/{customer_id}/googleAds:search"
-    headers = {
-        "Authorization":     f"Bearer {token}",
-        "developer-token":   dev_token,
-        "content-type":      "application/json",
-        "login-customer-id": mcc_id,
-    }
-    resp = requests.post(url, headers=headers, json={"query": query})
+
+    def _make_headers(t: str) -> dict:
+        return {
+            "Authorization":     f"Bearer {t}",
+            "developer-token":   dev_token,
+            "content-type":      "application/json",
+            "login-customer-id": mcc_id,
+        }
+
+    resp = requests.post(url, headers=_make_headers(token), json={"query": query})
+
+    # On 401: invalidate the cached token and retry once with a fresh one
+    if resp.status_code == 401:
+        try:
+            get_access_token.clear()
+            fresh_token, _, _, _ = get_access_token()
+            resp = requests.post(url, headers=_make_headers(fresh_token), json={"query": query})
+        except Exception:
+            pass
+
+    if resp.status_code == 401:
+        st.error("⚠️ Google Ads: يرجى تجديد التوكن — انتهت صلاحية رمز الوصول")
+        return []
     if resp.status_code != 200:
-        st.error(f"API error {resp.status_code}: {resp.text[:400]}")
+        st.error(f"Google Ads API error {resp.status_code}: {resp.text[:200]}")
         return []
     return resp.json().get("results", [])
 
 
 # ── Data fetchers ─────────────────────────────────────────────────────────────
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner="جارٍ تحميل Google Ads…")
 def fetch_campaign_data(customer_id, token, dev_token, start, end, mcc_id=""):
     q = f"""
     SELECT
@@ -918,18 +934,22 @@ def fetch_campaign_data(customer_id, token, dev_token, start, end, mcc_id=""):
     records = []
     for r in rows:
         c, m = r.get("campaign", {}), r.get("metrics", {})
+        cost     = round(float(m.get("costMicros", 0)) / 1e6, 2)
+        conv_val = round(float(m.get("conversionsValue", 0)), 2)
         records.append({
             "Campaign":    c.get("name", ""),
+            "Campaign ID": str(c.get("id", "")),
             "Status":      c.get("status", ""),
             "Type":        c.get("advertisingChannelType", ""),
             "Impressions": int(m.get("impressions", 0)),
             "Clicks":      int(m.get("clicks", 0)),
-            "Cost":        round(float(m.get("costMicros", 0)) / 1e6, 2),
+            "Cost":        cost,
             "CTR":         round(float(m.get("ctr", 0)) * 100, 2),
             "Avg CPC":     round(float(m.get("averageCpc", 0)) / 1e6, 2),
             "Conversions": round(float(m.get("conversions", 0)), 1),
-            "Conv. Value": round(float(m.get("conversionsValue", 0)), 2),
+            "Conv. Value": conv_val,
             "CPA":         round(float(m.get("costPerConversion", 0)) / 1e6, 2),
+            "ROAS":        round(conv_val / cost, 2) if cost > 0 else 0.0,
             "Imp. Share":  round(float(m.get("searchImpressionShare", 0)) * 100, 1)
                            if m.get("searchImpressionShare") else None,
         })
@@ -937,6 +957,100 @@ def fetch_campaign_data(customer_id, token, dev_token, start, end, mcc_id=""):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def fetch_adgroup_data(customer_id, token, dev_token, start, end, campaign_id="", mcc_id=""):
+    """Ad-group level data, optionally filtered by campaign_id."""
+    where_camp = f"AND campaign.id = {campaign_id}" if campaign_id else ""
+    q = f"""
+    SELECT
+      ad_group.id, ad_group.name, ad_group.status,
+      campaign.id, campaign.name,
+      metrics.impressions, metrics.clicks, metrics.cost_micros,
+      metrics.ctr, metrics.average_cpc, metrics.conversions,
+      metrics.conversions_value, metrics.cost_per_conversion
+    FROM ad_group
+    WHERE segments.date BETWEEN '{start}' AND '{end}'
+      AND ad_group.status != 'REMOVED'
+      {where_camp}
+    ORDER BY metrics.cost_micros DESC
+    """
+    rows = gaql(q, customer_id, token, dev_token, mcc_id)
+    if not rows:
+        return pd.DataFrame()
+    records = []
+    for r in rows:
+        ag, c, m = r.get("adGroup", {}), r.get("campaign", {}), r.get("metrics", {})
+        cost     = round(float(m.get("costMicros", 0)) / 1e6, 2)
+        conv_val = round(float(m.get("conversionsValue", 0)), 2)
+        conv     = round(float(m.get("conversions", 0)), 1)
+        records.append({
+            "ID":          str(ag.get("id", "")),
+            "Campaign":    ag.get("name", ""),
+            "Campaign ID": str(c.get("id", "")),
+            "Status":      ag.get("status", ""),
+            "Type":        "GOOGLE_ADGROUP",
+            "Impressions": int(m.get("impressions", 0)),
+            "Clicks":      int(m.get("clicks", 0)),
+            "Cost":        cost,
+            "CTR":         round(float(m.get("ctr", 0)) * 100, 2),
+            "Avg CPC":     round(float(m.get("averageCpc", 0)) / 1e6, 2),
+            "Conversions": conv,
+            "Conv. Value": conv_val,
+            "CPA":         round(float(m.get("costPerConversion", 0)) / 1e6, 2),
+            "ROAS":        round(conv_val / cost, 2) if cost > 0 else 0.0,
+            "Imp. Share":  None,
+        })
+    return pd.DataFrame(records)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_ad_data(customer_id, token, dev_token, start, end, adgroup_id="", mcc_id=""):
+    """Ad level data, optionally filtered by ad_group_id."""
+    where_ag = f"AND ad_group.id = {adgroup_id}" if adgroup_id else ""
+    q = f"""
+    SELECT
+      ad_group_ad.ad.id, ad_group_ad.ad.name, ad_group_ad.status,
+      ad_group.id, ad_group.name,
+      metrics.impressions, metrics.clicks, metrics.cost_micros,
+      metrics.ctr, metrics.average_cpc, metrics.conversions,
+      metrics.conversions_value, metrics.cost_per_conversion
+    FROM ad_group_ad
+    WHERE segments.date BETWEEN '{start}' AND '{end}'
+      AND ad_group_ad.status != 'REMOVED'
+      {where_ag}
+    ORDER BY metrics.cost_micros DESC
+    """
+    rows = gaql(q, customer_id, token, dev_token, mcc_id)
+    if not rows:
+        return pd.DataFrame()
+    records = []
+    for r in rows:
+        ad_wrap = r.get("adGroupAd", {})
+        ad_obj  = ad_wrap.get("ad", {})
+        ag, m   = r.get("adGroup", {}), r.get("metrics", {})
+        cost     = round(float(m.get("costMicros", 0)) / 1e6, 2)
+        conv_val = round(float(m.get("conversionsValue", 0)), 2)
+        conv     = round(float(m.get("conversions", 0)), 1)
+        records.append({
+            "ID":          str(ad_obj.get("id", "")),
+            "Campaign":    ad_obj.get("name", "") or f"Ad {ad_obj.get('id', '')}",
+            "Campaign ID": str(ag.get("id", "")),
+            "Status":      ad_wrap.get("status", ""),
+            "Type":        "GOOGLE_AD",
+            "Impressions": int(m.get("impressions", 0)),
+            "Clicks":      int(m.get("clicks", 0)),
+            "Cost":        cost,
+            "CTR":         round(float(m.get("ctr", 0)) * 100, 2),
+            "Avg CPC":     round(float(m.get("averageCpc", 0)) / 1e6, 2),
+            "Conversions": conv,
+            "Conv. Value": conv_val,
+            "CPA":         round(float(m.get("costPerConversion", 0)) / 1e6, 2),
+            "ROAS":        round(conv_val / cost, 2) if cost > 0 else 0.0,
+            "Imp. Share":  None,
+        })
+    return pd.DataFrame(records)
+
+
+@st.cache_data(ttl=300, show_spinner="جارٍ تحميل البيانات اليومية…")
 def fetch_daily_data(customer_id, token, dev_token, start, end, mcc_id=""):
     q = f"""
     SELECT
@@ -1560,7 +1674,8 @@ _meta_token      = os.getenv("META_ACCESS_TOKEN", "")
 _meta_accounts: list[dict] = []
 _meta_ready      = False   # True when module imported successfully
 
-_meta_token_status: dict = {"status": "unknown", "days_left": 0, "message": ""}
+_meta_token_status: dict = {"status": "unknown", "days_left": None, "message": ""}
+
 if _meta_token:
     try:
         from meta_ads_server import (
@@ -1571,7 +1686,7 @@ if _meta_token:
         )
         _meta_ready = True
         _meta_token_status = _get_meta_token_status()
-        # If token was refreshed in-process, reload it
+        # If token was refreshed in-process, reload it from env
         if _meta_token_status.get("status") == "refreshed":
             _meta_token = os.getenv("META_ACCESS_TOKEN", _meta_token)
     except Exception as _meta_import_err:
@@ -1580,8 +1695,29 @@ if _meta_token:
 if _meta_ready:
     try:
         _meta_accounts = fetch_meta_accounts(_meta_token)
-    except Exception:
+        print("[Meta] Available ad accounts:")
+        for _a in _meta_accounts:
+            print(f"  {_a['id']}  →  {_a['name']}")
+        if not _meta_accounts:
+            print("[Meta] No active ad accounts returned for this token.")
+    except Exception as _meta_acct_err:
+        print(f"[Meta] Failed to fetch ad accounts: {_meta_acct_err}")
         _meta_accounts = []   # API error: keep token for cross-platform fetches
+
+# ── Meta token expiry warning (shown once near top of page) ──────────────────
+_meta_days = _meta_token_status.get("days_left")
+if _meta_ready and _meta_days is not None and 0 < _meta_days <= 7:
+    st.warning(
+        f"⚠️ Meta token expires in **{_meta_days} day{'s' if _meta_days != 1 else ''}**. "
+        "Go to [Graph API Explorer](https://developers.facebook.com/tools/explorer/) "
+        "and generate a new token, then update `META_ACCESS_TOKEN` in `.env`.",
+        icon=None,
+    )
+elif _meta_ready and _meta_days is not None and _meta_days == 0:
+    st.error(
+        "❌ Meta token has expired. Update `META_ACCESS_TOKEN` in `.env` with a new token "
+        "from [Graph API Explorer](https://developers.facebook.com/tools/explorer/)."
+    )
 
 # ── Snap pre-fetch ────────────────────────────────────────────────────────────
 _snap_token    = os.getenv("SNAP_ACCESS_TOKEN", "")
@@ -1642,213 +1778,286 @@ if not _is_admin and st.query_params.get("token"):
     st.query_params.clear()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
+_on_project_detail = bool(st.session_state.get("selected_project_id"))
+_curr_page         = st.session_state.get("_nav_page", "🗂️  Projects")
+
+_PROJ_SIDEBAR_CSS = """<style>
+/* ── Project-detail sidebar button styles ── */
+section[data-testid="stSidebar"] button[kind="secondary"] {
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    border-radius: 8px !important;
+    color: rgba(255,255,255,0.5) !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    text-align: left !important;
+    transition: background 0.12s, color 0.12s !important;
+    box-shadow: none !important;
+}
+section[data-testid="stSidebar"] button[kind="secondary"]:hover {
+    background: rgba(255,255,255,0.05) !important;
+    color: rgba(255,255,255,0.82) !important;
+    border-color: rgba(255,255,255,0.08) !important;
+}
+section[data-testid="stSidebar"] button[kind="primary"] {
+    background: rgba(88,166,255,0.13) !important;
+    border: 1px solid rgba(88,166,255,0.3) !important;
+    border-radius: 8px !important;
+    color: #58a6ff !important;
+    font-size: 13px !important;
+    font-weight: 600 !important;
+    text-align: left !important;
+    box-shadow: none !important;
+}
+section[data-testid="stSidebar"] button[kind="primary"]:hover {
+    background: rgba(88,166,255,0.2) !important;
+    border-color: rgba(88,166,255,0.45) !important;
+    box-shadow: none !important;
+}
+/* Compact divider */
+section[data-testid="stSidebar"] hr {
+    border-color: rgba(255,255,255,0.07) !important;
+    margin: 8px 0 !important;
+}
+/* Section label */
+.sb-section-label {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+    color: rgba(255,255,255,0.25);
+    text-transform: uppercase;
+    margin-bottom: 6px;
+    margin-top: 2px;
+}
+</style>"""
+
+_PLAIN_SIDEBAR_CSS = """<style>
+[data-testid="stSidebar"] div[data-testid="stRadio"] > div {
+    gap: 2px !important; flex-direction: column !important; }
+[data-testid="stSidebar"] div[data-testid="stRadio"] label {
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    border-radius: 7px !important;
+    padding: 8px 10px !important;
+    cursor: pointer !important;
+    color: rgba(255,255,255,0.5) !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    margin: 0 !important; }
+[data-testid="stSidebar"] div[data-testid="stRadio"] label:hover {
+    background: rgba(255,255,255,0.05) !important;
+    color: rgba(255,255,255,0.85) !important; }
+[data-testid="stSidebar"] div[data-testid="stRadio"] label:has(input:checked) {
+    background: rgba(88,166,255,0.12) !important;
+    border-color: rgba(88,166,255,0.28) !important;
+    color: #58a6ff !important;
+    font-weight: 600 !important; }
+[data-testid="stSidebar"] div[data-testid="stRadio"] input[type="radio"] {
+    display: none !important; }
+</style>"""
+
 with st.sidebar:
-    if _is_admin:
+    today        = date.today()
+    current_username = _current_username
+    user_info        = _user_info
+
+    # ══════════════════════════════════════════════════════════════════════
+    # PROJECT DETAIL SIDEBAR — full custom layout
+    # ══════════════════════════════════════════════════════════════════════
+    if _on_project_detail:
+        st.markdown(_PROJ_SIDEBAR_CSS, unsafe_allow_html=True)
+
+        from projects_page import _NAV_LABELS, _NAV_KEYS, _platform_dots, _SNAP_SAR
+
+        _proj_name_sb = st.session_state.get("selected_project_name", "Project")
+        _proj_plat_sb = st.session_state.get("selected_project_platforms", {})
+
+        # Pre-compute dates from session state so campaign list can use them
+        _ps_preset = st.session_state.get("proj_date_preset", "Last 7 days")
+        if _ps_preset == "Today":
+            start_date = end_date = today
+        elif _ps_preset == "Yesterday":
+            start_date = end_date = today - timedelta(days=1)
+        elif _ps_preset == "Last 14 days":
+            start_date, end_date = today - timedelta(days=13), today
+        elif _ps_preset == "Last 30 days":
+            start_date, end_date = today - timedelta(days=29), today
+        elif _ps_preset == "This month":
+            start_date = today.replace(day=1); end_date = today
+        elif _ps_preset == "Custom":
+            start_date = st.session_state.get("proj_date_from", today - timedelta(days=6))
+            end_date   = st.session_state.get("proj_date_to",   today)
+        else:  # Last 7 days (default)
+            start_date, end_date = today - timedelta(days=6), today
+        _sb_start = str(start_date)
+        _sb_end   = str(end_date)
+
+        # ── 1. Logo ───────────────────────────────────────────────────────
+        st.markdown(
+            "<div style='padding:18px 0 14px'>"
+            "<div style='font-size:16px;font-weight:800;color:#f0f6fc;letter-spacing:-0.3px'>"
+            "⚡ Ads Intelligence</div>"
+            "<div style='font-size:9.5px;color:rgba(255,255,255,0.22);letter-spacing:2.2px;"
+            "text-transform:uppercase;margin-top:3px'>Media Buying</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── 2. User avatar + logout ───────────────────────────────────────
+        _initials = "".join(w[0].upper() for w in current_username.split()[:2]) or "U"
+        _av_col, _un_col, _lo_col = st.columns([1.1, 3.5, 1])
+        _av_col.markdown(
+            f"<div style='width:34px;height:34px;border-radius:50%;"
+            f"background:linear-gradient(135deg,#58a6ff 0%,#3b82f6 100%);"
+            f"display:flex;align-items:center;justify-content:center;"
+            f"font-size:13px;font-weight:700;color:#fff;margin-top:2px'>"
+            f"{_initials}</div>",
+            unsafe_allow_html=True,
+        )
+        _un_col.markdown(
+            f"<div style='padding-top:1px'>"
+            f"<div style='font-size:12px;font-weight:600;color:#f0f6fc;line-height:1.3'>"
+            f"{current_username}</div>"
+            f"<div style='font-size:10px;color:rgba(255,255,255,0.3)'>Media Buyer</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        if _lo_col.button("↩", key="proj_logout_sb", help="Logout"):
+            do_logout()
+
+        st.markdown(
+            "<div style='height:1px;background:rgba(255,255,255,0.07);margin:12px 0 10px'></div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── 3. CLIENT section ─────────────────────────────────────────────
+        st.markdown(
+            "<div class='sb-section-label'>CLIENT</div>"
+            f"<div style='font-size:15px;font-weight:700;color:#f0f6fc;line-height:1.2;"
+            f"margin-bottom:6px'>{_proj_name_sb}</div>"
+            f"<div style='margin-bottom:6px'>{_platform_dots(_proj_plat_sb)}</div>"
+            "<div style='font-size:11px;color:#3fb950;margin-bottom:8px'>● Active campaign</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            "<div style='height:1px;background:rgba(255,255,255,0.07);margin:12px 0 10px'></div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── 4. DATE RANGE ─────────────────────────────────────────────────
+        st.markdown("<div class='sb-section-label'>DATE RANGE</div>", unsafe_allow_html=True)
+        preset = st.selectbox(
+            "date_range",
+            ["Today", "Yesterday", "Last 7 days", "Last 14 days",
+             "Last 30 days", "This month", "Custom"],
+            index=2,
+            label_visibility="collapsed",
+            key="proj_date_preset",
+        )
+        if preset == "Today":
+            start_date = end_date = today
+        elif preset == "Yesterday":
+            start_date = end_date = today - timedelta(days=1)
+        elif preset == "Last 7 days":
+            start_date, end_date = today - timedelta(days=6), today
+        elif preset == "Last 14 days":
+            start_date, end_date = today - timedelta(days=13), today
+        elif preset == "Last 30 days":
+            start_date, end_date = today - timedelta(days=29), today
+        elif preset == "This month":
+            start_date = today.replace(day=1); end_date = today
+        else:
+            _dc1, _dc2 = st.columns(2)
+            start_date = _dc1.date_input("From", today - timedelta(days=6), key="proj_date_from")
+            end_date   = _dc2.date_input("To",   today, key="proj_date_to")
+
+        st.markdown(
+            "<div style='height:1px;background:rgba(255,255,255,0.07);margin:12px 0 10px'></div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── 5. Last updated + refresh ─────────────────────────────────────
+        _last_upd = st.session_state.get("proj_last_refresh", datetime.now().strftime("%H:%M"))
+        _upd_col, _ref_col = st.columns([3, 1])
+        _upd_col.markdown(
+            f"<div style='font-size:11px;color:rgba(255,255,255,0.3);padding-top:7px'>"
+            f"🟢 محدّث {_last_upd}</div>",
+            unsafe_allow_html=True,
+        )
+        if _ref_col.button("↻", key="proj_refresh_sb", help="تحديث", use_container_width=True):
+            st.cache_data.clear()
+            st.session_state["proj_last_refresh"] = datetime.now().strftime("%H:%M")
+            st.rerun()
+
+        st.markdown(
+            "<div style='height:1px;background:rgba(255,255,255,0.07);margin:12px 0 10px'></div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── 6. Navigation ─────────────────────────────────────────────────
+        st.markdown("<div class='sb-section-label'>NAVIGATE</div>", unsafe_allow_html=True)
+        _active_nav_lbl = st.session_state.get("proj_nav_radio", "📊 نظرة عامة")
+        _active_nav_sec = _NAV_KEYS.get(_active_nav_lbl, "overview")
+        for _nav_lbl in _NAV_LABELS:
+            _nav_sec = _NAV_KEYS[_nav_lbl]
+            if st.button(
+                _nav_lbl,
+                key=f"proj_nav_btn_{_nav_sec}",
+                use_container_width=True,
+                type="primary" if _active_nav_sec == _nav_sec else "secondary",
+            ):
+                st.session_state["proj_nav_radio"] = _nav_lbl
+                st.rerun()
+
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        if st.button("← المشاريع", key="proj_back_sb", use_container_width=True):
+            for _k in ("selected_project_id", "selected_project_name",
+                       "selected_project_platforms", "_proj_detail_id",
+                       "proj_nav_radio",
+                       "proj_last_refresh"):
+                st.session_state.pop(_k, None)
+            st.rerun()
+
+        selected_client         = ""
+        selected_customer_id    = ""
+        selected_meta_acct_id   = ""
+        selected_meta_acct_name = ""
+        selected_snap_acct_id   = ""
+        selected_snap_acct_name = ""
+        show_paused = False
+        _page = "🗂️  Projects"
+
+    # ══════════════════════════════════════════════════════════════════════
+    # PROJECTS LIST SIDEBAR — minimal
+    # ══════════════════════════════════════════════════════════════════════
+    elif _is_admin and _curr_page == "🗂️  Projects":
+        st.markdown(_PLAIN_SIDEBAR_CSS, unsafe_allow_html=True)
         st.markdown("""
         <div style='padding:4px 0 20px'>
           <div style='font-size:17px;font-weight:800;color:#f0f6fc;letter-spacing:-0.5px'>⚡ Ads Intelligence</div>
           <div style='font-size:11px;color:rgba(255,255,255,0.3);margin-top:3px'>Media Buying Dashboard</div>
         </div>
         """, unsafe_allow_html=True)
-    else:
-        st.markdown(f"""
-        <div style='padding:4px 0 20px'>
-          <div style='font-size:17px;font-weight:800;color:#f0f6fc;letter-spacing:-0.5px'>{_display_name}</div>
-          <div style='font-size:11px;color:rgba(255,255,255,0.3);margin-top:3px;direction:rtl'>تقرير الأداء الإعلاني</div>
-        </div>
-        """, unsafe_allow_html=True)
-    st.divider()
-
-    vis_sidebar = st.session_state.get("client_name_visible", False)
-
-    # ── Logout ────────────────────────────────────────────────────────────────
-    current_username = _current_username
-    user_info        = _user_info
-
-    col_user, col_logout = st.columns([2, 1])
-    col_user.markdown(
-        f"<div style='font-size:12px;color:rgba(255,255,255,0.4);padding-top:6px'>"
-        f"👤 {current_username}</div>",
-        unsafe_allow_html=True,
-    )
-    if col_logout.button("Logout", use_container_width=True):
-        do_logout()
-
-    st.divider()
-
-    # ── Account selector (platform-aware) ────────────────────────────────────
-    if user_info.get("role") == "admin":
-        if _active_platform == "🔵  Google Ads":
-            if not vis_sidebar:
-                st.markdown("""
-                <style>
-                [data-testid="stSidebar"] div[data-baseweb="select"] > div {
-                  border: 1px solid #ff4d4f !important;
-                  box-shadow: 0 0 8px rgba(255,77,79,0.3) !important;
-                }
-                </style>
-                """, unsafe_allow_html=True)
-            client_options = [
-                {"id": cid, "name": name, "display": mask_name(name, vis_sidebar)}
-                for name, cid in clients.items()
-            ]
-            sel = st.selectbox(
-                "CLIENT",
-                options=client_options,
-                format_func=lambda x: x["display"],
-                label_visibility="visible",
-                key="selected_client",
-            )
-            selected_client      = sel["name"]
-            selected_customer_id = sel["id"]
-            selected_meta_acct_id   = ""
-            selected_meta_acct_name = ""
-            selected_snap_acct_id   = ""
-            selected_snap_acct_name = ""
-        elif _active_platform == "📘  Meta Ads":
-            selected_client      = ""
-            selected_customer_id = ""
-            selected_snap_acct_id   = ""
-            selected_snap_acct_name = ""
-            if _meta_accounts:
-                _ma_sb_opts = {a["name"]: a["id"] for a in _meta_accounts}
-                _ma_sb_sel  = st.selectbox(
-                    "META ACCOUNT",
-                    list(_ma_sb_opts.keys()),
-                    key="meta_account_sel",
-                    label_visibility="visible",
-                )
-                selected_meta_acct_id   = _ma_sb_opts[_ma_sb_sel]
-                selected_meta_acct_name = _ma_sb_sel
-            else:
-                st.warning("No Meta accounts found")
-                selected_meta_acct_id   = ""
-                selected_meta_acct_name = ""
-        elif _active_platform == "🟡  Snap Ads":
-            selected_client      = ""
-            selected_customer_id = ""
-            selected_meta_acct_id   = ""
-            selected_meta_acct_name = ""
-            if _snap_accounts:
-                _sa_sb_opts = {a["name"]: a["id"] for a in _snap_accounts}
-                _sa_sb_sel  = st.selectbox(
-                    "SNAP ACCOUNT",
-                    list(_sa_sb_opts.keys()),
-                    key="snap_account_sel",
-                    label_visibility="visible",
-                )
-                selected_snap_acct_id   = _sa_sb_opts[_sa_sb_sel]
-                selected_snap_acct_name = _sa_sb_sel
-            else:
-                st.warning("No Snap accounts found")
-                selected_snap_acct_id   = ""
-                selected_snap_acct_name = ""
-        else:  # TikTok Ads
-            selected_client         = ""
-            selected_customer_id    = ""
-            selected_meta_acct_id   = ""
-            selected_meta_acct_name = ""
-            selected_snap_acct_id   = ""
-            selected_snap_acct_name = ""
-            if _tiktok_ready:
-                st.markdown(
-                    f"<div style='font-size:10px;font-weight:700;letter-spacing:1px;"
-                    f"color:rgba(255,255,255,0.3);text-transform:uppercase;"
-                    f"margin-bottom:4px'>TIKTOK ADVERTISER</div>"
-                    f"<div style='font-size:13px;color:#f0f6fc;font-weight:600;"
-                    f"padding:6px 0'>{_tiktok_adv_name}</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.warning("TikTok not configured — add credentials to .env")
-    else:
-        assigned_cid  = user_info.get("client_id", "")
-        assigned_name = next((n for n, c in clients.items() if c == assigned_cid), _display_name)
-        selected_client         = assigned_name
-        selected_customer_id    = assigned_cid
+        st.divider()
+        col_user, col_logout = st.columns([2, 1])
+        col_user.markdown(
+            f"<div style='font-size:12px;color:rgba(255,255,255,0.4);padding-top:6px'>"
+            f"👤 {current_username}</div>",
+            unsafe_allow_html=True,
+        )
+        if col_logout.button("Logout", key="sb_logout_proj_list", use_container_width=True):
+            do_logout()
+        st.divider()
+        start_date = today - timedelta(days=6)
+        end_date   = today
+        show_paused = False
+        selected_client         = ""
+        selected_customer_id    = ""
         selected_meta_acct_id   = ""
         selected_meta_acct_name = ""
         selected_snap_acct_id   = ""
         selected_snap_acct_name = ""
-
-    if _is_admin:
-        st.divider()
-
-    today = date.today()
-    preset = st.selectbox("DATE RANGE", [
-        "Today", "Yesterday", "Last 7 days", "Last 14 days",
-        "Last 30 days", "This month", "Custom"
-    ], index=2, label_visibility="visible")
-
-    if preset == "Today":
-        start_date, end_date = today, today
-    elif preset == "Yesterday":
-        start_date = end_date = today - timedelta(days=1)
-    elif preset == "Last 7 days":
-        start_date, end_date = today - timedelta(days=6), today
-    elif preset == "Last 14 days":
-        start_date, end_date = today - timedelta(days=13), today
-    elif preset == "Last 30 days":
-        start_date, end_date = today - timedelta(days=29), today
-    elif preset == "This month":
-        start_date = today.replace(day=1); end_date = today
-    else:
-        c1, c2 = st.columns(2)
-        start_date = c1.date_input("From", today - timedelta(days=6))
-        end_date   = c2.date_input("To",   today)
-
-    st.divider()
-    show_paused = st.toggle("Show paused campaigns", value=False)
-
-    st.divider()
-    if st.button("↺  Refresh data", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-
-    if _is_admin:
-        if _active_platform == "📘  Meta Ads":
-            _src_api = "Meta Marketing API v20"
-            _tst = _meta_token_status.get("status", "unknown")
-            _tdl = _meta_token_status.get("days_left", 0)
-            if _tst == "expired":
-                _src_note = "✗ Token expired — update META_ACCESS_TOKEN"
-                _note_col = "#f85149"
-            elif _tdl == 9999 or _tst in ("ok", "refreshed", "unknown"):
-                _src_note = "✓ Token valid — System User"
-                _note_col = "#3fb950"
-            elif _tdl > 0:
-                _src_note = f"✓ Token valid — {_tdl} days remaining"
-                _note_col = "#3fb950" if _tdl > 7 else "#d29922"
-            else:
-                _src_note = "✓ Token active"
-                _note_col = "#3fb950"
-        elif _active_platform == "🟡  Snap Ads":
-            _src_api  = "Snapchat Marketing API v1"
-            _src_note = "✓ Token active" if _snap_ready else "✗ Token missing"
-            _note_col = "#3fb950" if _snap_ready else "#f85149"
-        elif _active_platform == "⚫  TikTok Ads":
-            _src_api  = "TikTok Marketing API v1.3"
-            _src_note = "✓ Token active" if _tiktok_ready else "✗ Credentials pending"
-            _note_col = "#3fb950" if _tiktok_ready else "#f85149"
-        else:
-            _src_api  = "Google Ads API v20"
-            _src_note = "Auto-refresh every 5 min"
-            _note_col = "rgba(255,255,255,0.2)"
-        st.markdown(f"""
-        <div style='margin-top:24px;padding:14px;background:rgba(255,255,255,0.03);
-                    border-radius:12px;border:1px solid rgba(255,255,255,0.05)'>
-          <div style='font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:1px;
-                      text-transform:uppercase;margin-bottom:8px'>Data source</div>
-          <div style='font-size:11.5px;color:rgba(255,255,255,0.45);font-weight:500'>
-            {_src_api}</div>
-          <div style='font-size:10.5px;color:{_note_col};margin-top:2px'>
-            {_src_note}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ── Admin Panel nav (admin-only) ──────────────────────────────────────────
-    if _is_admin:
-        st.divider()
         _page = st.radio(
             "NAVIGATE",
             ["🗂️  Projects", "📊  Dashboard", "✍️  Campaign Creator", "⚙️  Admin Panel"],
@@ -1856,8 +2065,208 @@ with st.sidebar:
             key="_nav_page",
             label_visibility="visible",
         )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # NORMAL DASHBOARD SIDEBAR
+    # ══════════════════════════════════════════════════════════════════════
     else:
-        _page = "📊  Dashboard"
+        st.markdown(_PLAIN_SIDEBAR_CSS, unsafe_allow_html=True)
+
+        if _is_admin:
+            st.markdown("""
+            <div style='padding:4px 0 20px'>
+              <div style='font-size:17px;font-weight:800;color:#f0f6fc;letter-spacing:-0.5px'>⚡ Ads Intelligence</div>
+              <div style='font-size:11px;color:rgba(255,255,255,0.3);margin-top:3px'>Media Buying Dashboard</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style='padding:4px 0 20px'>
+              <div style='font-size:17px;font-weight:800;color:#f0f6fc;letter-spacing:-0.5px'>{_display_name}</div>
+              <div style='font-size:11px;color:rgba(255,255,255,0.3);margin-top:3px;direction:rtl'>تقرير الأداء الإعلاني</div>
+            </div>
+            """, unsafe_allow_html=True)
+        st.divider()
+
+        col_user, col_logout = st.columns([2, 1])
+        col_user.markdown(
+            f"<div style='font-size:12px;color:rgba(255,255,255,0.4);padding-top:6px'>"
+            f"👤 {current_username}</div>",
+            unsafe_allow_html=True,
+        )
+        if col_logout.button("Logout", key="sb_logout_dash", use_container_width=True):
+            do_logout()
+        st.divider()
+
+        vis_sidebar = st.session_state.get("client_name_visible", False)
+
+        if user_info.get("role") == "admin":
+            if _active_platform == "🔵  Google Ads":
+                if not vis_sidebar:
+                    st.markdown("""
+                    <style>
+                    [data-testid="stSidebar"] div[data-baseweb="select"] > div {
+                      border: 1px solid #ff4d4f !important;
+                      box-shadow: 0 0 8px rgba(255,77,79,0.3) !important;
+                    }
+                    </style>
+                    """, unsafe_allow_html=True)
+                client_options = [
+                    {"id": cid, "name": name, "display": mask_name(name, vis_sidebar)}
+                    for name, cid in clients.items()
+                ]
+                sel = st.selectbox(
+                    "CLIENT",
+                    options=client_options,
+                    format_func=lambda x: x["display"],
+                    label_visibility="visible",
+                    key="selected_client",
+                )
+                selected_client      = sel["name"]
+                selected_customer_id = sel["id"]
+                selected_meta_acct_id   = ""
+                selected_meta_acct_name = ""
+                selected_snap_acct_id   = ""
+                selected_snap_acct_name = ""
+            elif _active_platform == "📘  Meta Ads":
+                selected_client      = ""
+                selected_customer_id = ""
+                selected_snap_acct_id   = ""
+                selected_snap_acct_name = ""
+                if _meta_accounts:
+                    _ma_sb_opts = {a["name"]: a["id"] for a in _meta_accounts}
+                    _ma_sb_sel  = st.selectbox(
+                        "META ACCOUNT",
+                        list(_ma_sb_opts.keys()),
+                        key="meta_account_sel",
+                        label_visibility="visible",
+                    )
+                    selected_meta_acct_id   = _ma_sb_opts[_ma_sb_sel]
+                    selected_meta_acct_name = _ma_sb_sel
+                else:
+                    st.warning("No Meta accounts found")
+                    selected_meta_acct_id   = ""
+                    selected_meta_acct_name = ""
+            elif _active_platform == "🟡  Snap Ads":
+                selected_client      = ""
+                selected_customer_id = ""
+                selected_meta_acct_id   = ""
+                selected_meta_acct_name = ""
+                if _snap_accounts:
+                    _sa_sb_opts = {a["name"]: a["id"] for a in _snap_accounts}
+                    _sa_sb_sel  = st.selectbox(
+                        "SNAP ACCOUNT",
+                        list(_sa_sb_opts.keys()),
+                        key="snap_account_sel",
+                        label_visibility="visible",
+                    )
+                    selected_snap_acct_id   = _sa_sb_opts[_sa_sb_sel]
+                    selected_snap_acct_name = _sa_sb_sel
+                else:
+                    st.warning("No Snap accounts found")
+                    selected_snap_acct_id   = ""
+                    selected_snap_acct_name = ""
+            else:  # TikTok Ads
+                selected_client         = ""
+                selected_customer_id    = ""
+                selected_meta_acct_id   = ""
+                selected_meta_acct_name = ""
+                selected_snap_acct_id   = ""
+                selected_snap_acct_name = ""
+                if _tiktok_ready:
+                    st.markdown(
+                        f"<div style='font-size:10px;font-weight:700;letter-spacing:1px;"
+                        f"color:rgba(255,255,255,0.3);text-transform:uppercase;"
+                        f"margin-bottom:4px'>TIKTOK ADVERTISER</div>"
+                        f"<div style='font-size:13px;color:#f0f6fc;font-weight:600;"
+                        f"padding:6px 0'>{_tiktok_adv_name}</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.warning("TikTok not configured — add credentials to .env")
+        else:
+            assigned_cid  = user_info.get("client_id", "")
+            assigned_name = next((n for n, c in clients.items() if c == assigned_cid), _display_name)
+            selected_client         = assigned_name
+            selected_customer_id    = assigned_cid
+            selected_meta_acct_id   = ""
+            selected_meta_acct_name = ""
+            selected_snap_acct_id   = ""
+            selected_snap_acct_name = ""
+
+        if _is_admin:
+            st.divider()
+
+        preset = st.selectbox("DATE RANGE", [
+            "Today", "Yesterday", "Last 7 days", "Last 14 days",
+            "Last 30 days", "This month", "Custom"
+        ], index=2, label_visibility="visible")
+
+        if preset == "Today":
+            start_date, end_date = today, today
+        elif preset == "Yesterday":
+            start_date = end_date = today - timedelta(days=1)
+        elif preset == "Last 7 days":
+            start_date, end_date = today - timedelta(days=6), today
+        elif preset == "Last 14 days":
+            start_date, end_date = today - timedelta(days=13), today
+        elif preset == "Last 30 days":
+            start_date, end_date = today - timedelta(days=29), today
+        elif preset == "This month":
+            start_date = today.replace(day=1); end_date = today
+        else:
+            c1, c2 = st.columns(2)
+            start_date = c1.date_input("From", today - timedelta(days=6))
+            end_date   = c2.date_input("To",   today)
+
+        st.divider()
+        show_paused = st.toggle("Show paused campaigns", value=False)
+
+        st.divider()
+        if st.button("↺  Refresh data", key="sb_refresh_dash", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+        if _is_admin:
+            if _active_platform == "📘  Meta Ads":
+                _src_api  = "Meta Marketing API v20"
+                _src_note = "✓ Token active" if _meta_ready else "✗ Token missing"
+                _note_col = "#3fb950" if _meta_ready else "#f85149"
+            elif _active_platform == "🟡  Snap Ads":
+                _src_api  = "Snapchat Marketing API v1"
+                _src_note = "✓ Token active" if _snap_ready else "✗ Token missing"
+                _note_col = "#3fb950" if _snap_ready else "#f85149"
+            elif _active_platform == "⚫  TikTok Ads":
+                _src_api  = "TikTok Marketing API v1.3"
+                _src_note = "✓ Token active" if _tiktok_ready else "✗ Credentials pending"
+                _note_col = "#3fb950" if _tiktok_ready else "#f85149"
+            else:
+                _src_api  = "Google Ads API v20"
+                _src_note = "Auto-refresh every 5 min"
+                _note_col = "rgba(255,255,255,0.2)"
+            st.markdown(f"""
+            <div style='margin-top:24px;padding:14px;background:rgba(255,255,255,0.03);
+                        border-radius:12px;border:1px solid rgba(255,255,255,0.05)'>
+              <div style='font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:1px;
+                          text-transform:uppercase;margin-bottom:8px'>Data source</div>
+              <div style='font-size:11.5px;color:rgba(255,255,255,0.45);font-weight:500'>
+                {_src_api}</div>
+              <div style='font-size:10.5px;color:{_note_col};margin-top:2px'>
+                {_src_note}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        if _is_admin:
+            st.divider()
+            _page = st.radio(
+                "NAVIGATE",
+                ["🗂️  Projects", "📊  Dashboard", "✍️  Campaign Creator", "⚙️  Admin Panel"],
+                index=0,
+                key="_nav_page",
+                label_visibility="visible",
+            )
+        else:
+            _page = "📊  Dashboard"
 
 # ── Page routing (admin-only pages) ───────────────────────────────────────────
 if _page == "🗂️  Projects":
@@ -1869,11 +2278,19 @@ if _page == "🗂️  Projects":
     def _google_daily_for_projects(customer_id: str, start: str, end: str):
         return fetch_daily_data(customer_id, token, dev_token, start, end, mcc_id)
 
+    def _google_adgroups_for_projects(customer_id: str, start: str, end: str, campaign_id: str = ""):
+        return fetch_adgroup_data(customer_id, token, dev_token, start, end, campaign_id, mcc_id)
+
+    def _google_ads_for_projects(customer_id: str, start: str, end: str, adgroup_id: str = ""):
+        return fetch_ad_data(customer_id, token, dev_token, start, end, adgroup_id, mcc_id)
+
     render_projects_page(
         start=start_date.strftime("%Y-%m-%d"),
         end=end_date.strftime("%Y-%m-%d"),
         fetch_google=_google_fetch_for_projects,
         fetch_google_daily=_google_daily_for_projects,
+        fetch_google_adgroups=_google_adgroups_for_projects,
+        fetch_google_ads=_google_ads_for_projects,
     )
     st.stop()
 
@@ -1945,13 +2362,12 @@ _cross_meta_id  = (f"act_{_cross_meta_raw}" if _cross_meta_raw and not _cross_me
 _cross_snap_id  = _snap_id_for_google(selected_customer_id) if selected_customer_id else ""
 
 if _is_admin and (_cross_meta_id or _cross_snap_id) and selected_customer_id:
-    with st.spinner("Loading cross-platform data…"):
-        _cp_gdf  = fetch_campaign_data(selected_customer_id, token, dev_token, start_str, end_str, mcc_id)
-        _cp_gday = fetch_daily_data(selected_customer_id, token, dev_token, start_str, end_str, mcc_id)
-        _cp_mdf  = fetch_meta_campaigns(_meta_token, _cross_meta_id, start_str, end_str) if _cross_meta_id and _meta_token and _meta_ready else pd.DataFrame()
-        _cp_mday = fetch_meta_daily(_meta_token, _cross_meta_id, start_str, end_str)     if _cross_meta_id and _meta_token and _meta_ready else pd.DataFrame()
-        _cp_sdf  = fetch_snap_campaigns(_snap_token, _cross_snap_id, start_str, end_str, show_paused=False) if _cross_snap_id and _snap_token and _snap_ready else pd.DataFrame()
-        _cp_sday = fetch_snap_daily(_snap_token, _cross_snap_id, start_str, end_str)     if _cross_snap_id and _snap_token and _snap_ready else pd.DataFrame()
+    _cp_gdf  = fetch_campaign_data(selected_customer_id, token, dev_token, start_str, end_str, mcc_id)
+    _cp_gday = fetch_daily_data(selected_customer_id, token, dev_token, start_str, end_str, mcc_id)
+    _cp_mdf  = fetch_meta_campaigns(_meta_token, _cross_meta_id, start_str, end_str) if _cross_meta_id and _meta_token and _meta_ready else pd.DataFrame()
+    _cp_mday = fetch_meta_daily(_meta_token, _cross_meta_id, start_str, end_str)     if _cross_meta_id and _meta_token and _meta_ready else pd.DataFrame()
+    _cp_sdf  = fetch_snap_campaigns(_snap_token, _cross_snap_id, start_str, end_str, show_paused=False) if _cross_snap_id and _snap_token and _snap_ready else pd.DataFrame()
+    _cp_sday = fetch_snap_daily(_snap_token, _cross_snap_id, start_str, end_str)     if _cross_snap_id and _snap_token and _snap_ready else pd.DataFrame()
 
     # ── Google aggregates ─────────────────────────────────────────────────────
     _g_spend = _cp_gdf["Cost"].sum()        if not _cp_gdf.empty else 0.0
@@ -3129,9 +3545,8 @@ if _platform == "⚫  TikTok Ads":
 # ── Fetch data ────────────────────────────────────────────────────────────────
 customer_id = selected_customer_id
 
-with st.spinner(""):
-    df_camp  = fetch_campaign_data(customer_id, token, dev_token, start_str, end_str, mcc_id)
-    df_daily = fetch_daily_data(customer_id, token, dev_token, start_str, end_str, mcc_id)
+df_camp  = fetch_campaign_data(customer_id, token, dev_token, start_str, end_str, mcc_id)
+df_daily = fetch_daily_data(customer_id, token, dev_token, start_str, end_str, mcc_id)
 
 if df_camp.empty:
     st.warning("No data found for the selected date range.")

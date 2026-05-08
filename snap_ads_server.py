@@ -241,7 +241,7 @@ def fetch_snap_accounts(token: str) -> list[dict]:
 
 # ── Campaign performance ───────────────────────────────────────────────────────
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner="جارٍ تحميل حملات Snap…")
 def fetch_snap_campaigns(token: str, account_id: str,
                          start: str, end: str,
                          show_paused: bool = False) -> pd.DataFrame:
@@ -285,11 +285,13 @@ def fetch_snap_campaigns(token: str, account_id: str,
 
 # ── Daily data ────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner="جارٍ تحميل بيانات Snap اليومية…")
 def fetch_snap_daily(token: str, account_id: str,
-                     start: str, end: str) -> pd.DataFrame:
-    """Daily breakdown aggregated across all active campaigns.
-    Account-level stats only support 'spend'; we use campaign-level DAY stats."""
+                     start: str, end: str,
+                     show_paused: bool = False) -> pd.DataFrame:
+    """Daily breakdown aggregated across campaigns.
+    Account-level stats only support 'spend'; we use campaign-level DAY stats.
+    Pass show_paused=True to include paused/inactive campaigns in the totals."""
     try:
         resp = _get(f"/adaccounts/{account_id}/campaigns", token)
     except RuntimeError:
@@ -300,7 +302,8 @@ def fetch_snap_daily(token: str, account_id: str,
     _daily_fields = "impressions,swipes,spend,conversion_purchases,conversion_purchases_value"
 
     for c_wrap in resp.get("campaigns", []):
-        if c_wrap.get("campaign", {}).get("status") != "ACTIVE":
+        camp_status = c_wrap.get("campaign", {}).get("status", "")
+        if not show_paused and camp_status != "ACTIVE":
             continue
         c       = c_wrap.get("campaign", {})
         camp_id = c.get("id", "")
@@ -411,3 +414,126 @@ def fetch_snap_ads(token: str, adset_id: str,
     if not records:
         return pd.DataFrame()
     return pd.DataFrame(records).reset_index(drop=True)
+
+
+# ── All-ads (creative analysis) ───────────────────────────────────────────────
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_snap_all_ads(token: str, account_id: str, start: str, end: str,
+                       active_only: bool = True) -> pd.DataFrame:
+    """
+    Ad-level data for the entire Snap account — fully parallel + filtered.
+
+    By default (active_only=True), only drills into ACTIVE campaigns/squads
+    and returns ACTIVE+PAUSED ads. This is dramatically faster than fetching
+    every archived/deleted entity.
+
+    Wave 1: all campaigns (1 call).
+    Wave 2: ad-squads per ACTIVE campaign (parallel, 30 workers).
+    Wave 3: ads per ACTIVE squad (parallel, 30 workers).
+    Wave 4: stats per ad (parallel, 50 workers).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # ── Wave 1: campaigns ─────────────────────────────────────────────────────
+    try:
+        camp_resp = _get(f"/adaccounts/{account_id}/campaigns", token)
+    except RuntimeError as e:
+        if "TOKEN_EXPIRED" in str(e):
+            _show_token_error()
+        return pd.DataFrame()
+
+    campaigns = []
+    for c_wrap in camp_resp.get("campaigns", []):
+        c = c_wrap.get("campaign", {})
+        cid = c.get("id", "")
+        if not cid:
+            continue
+        cstatus = c.get("status", "PAUSED")
+        # Skip non-active campaigns when active_only is True (huge speedup)
+        if active_only and cstatus != "ACTIVE":
+            continue
+        campaigns.append((cid, c.get("name", "")))
+
+    if not campaigns:
+        return pd.DataFrame()
+
+    currency = get_snap_account_currency(token, account_id)
+
+    # ── Wave 2: squads (parallel) ─────────────────────────────────────────────
+    def _get_squads(camp_id_name):
+        camp_id, camp_name = camp_id_name
+        try:
+            resp = _get(f"/campaigns/{camp_id}/adsquads", token)
+            return camp_id, camp_name, resp.get("adsquads", [])
+        except Exception:
+            return camp_id, camp_name, []
+
+    squad_jobs = []
+    with ThreadPoolExecutor(max_workers=30) as ex:
+        futs = {ex.submit(_get_squads, c): c for c in campaigns}
+        for fut in as_completed(futs):
+            camp_id, camp_name, adsquads = fut.result()
+            for sq_wrap in adsquads:
+                sq        = sq_wrap.get("adsquad", {})
+                sq_id     = sq.get("id", "")
+                sq_status = sq.get("status", "PAUSED")
+                if not sq_id:
+                    continue
+                if active_only and sq_status != "ACTIVE":
+                    continue
+                squad_jobs.append((sq_id, sq.get("name", ""), camp_id, camp_name))
+
+    if not squad_jobs:
+        return pd.DataFrame()
+
+    # ── Wave 3: ads per squad (parallel) ──────────────────────────────────────
+    def _get_ads(sq_tuple):
+        sq_id, sq_name, camp_id, camp_name = sq_tuple
+        try:
+            resp = _get(f"/adsquads/{sq_id}/ads", token)
+            return [(ad_wrap.get("ad", {}), sq_id, sq_name, camp_id, camp_name)
+                    for ad_wrap in resp.get("ads", [])
+                    if ad_wrap.get("ad", {}).get("id")]
+        except Exception:
+            return []
+
+    ad_jobs = []
+    with ThreadPoolExecutor(max_workers=30) as ex:
+        futs = [ex.submit(_get_ads, sq) for sq in squad_jobs]
+        for fut in as_completed(futs):
+            ad_jobs.extend(fut.result())
+
+    if not ad_jobs:
+        return pd.DataFrame()
+
+    # ── Wave 4: stats per ad (high parallelism) ───────────────────────────────
+    def _get_ad_stats(ad_tuple):
+        ad, sq_id, sq_name, camp_id, camp_name = ad_tuple
+        ad_id     = ad.get("id", "")
+        ad_name   = ad.get("name", "")
+        ad_status = ad.get("status", "PAUSED")
+        try:
+            s = _fetch_stats(f"/ads/{ad_id}/stats", token, start, end, currency)
+        except Exception:
+            s = _empty_stats()
+        rec = _to_df_row(ad_name, ad_id, sq_id, ad_status, "SNAP_AD", s)
+        rec["Ad Set Name"]   = sq_name
+        rec["Ad Set ID"]     = sq_id
+        rec["Campaign Name"] = camp_name
+        rec["Campaign ID"]   = camp_id
+        rec["thumbnail_url"] = ""
+        return rec
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=50) as ex:
+        futs = [ex.submit(_get_ad_stats, job) for job in ad_jobs]
+        for fut in as_completed(futs):
+            try:
+                rows.append(fut.result())
+            except Exception:
+                pass
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).reset_index(drop=True)

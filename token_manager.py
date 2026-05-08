@@ -44,9 +44,42 @@ def _env(key: str) -> str:
 
 def check_token_info(token: str, app_id: str = "", app_secret: str = "") -> dict:
     """
-    Validate token by calling /me — works for user tokens AND system user tokens.
-    Returns a normalised dict with 'is_valid', 'expires_at', 'type' keys.
+    Validate token. Tries /debug_token first (gives type + expiry), falls back to /me.
+
+    System User tokens have type='SYSTEM_USER' and expires_at=0 — treated as permanent.
+    Returns a normalised dict with 'is_valid', 'expires_at', 'days_left', 'type' keys.
     """
+    # ── Try /debug_token when app credentials match the token's issuing app ─────
+    if app_id and app_secret:
+        try:
+            r = requests.get(
+                f"{META_API}/debug_token",
+                params={"input_token": token, "access_token": f"{app_id}|{app_secret}"},
+                timeout=15,
+            )
+            body = r.json()
+            if "data" in body:          # app_id matches — full metadata available
+                d          = body["data"]
+                is_valid   = bool(d.get("is_valid", False))
+                token_type = str(d.get("type", "")).upper()
+                expires_at = int(d.get("expires_at", 0) or 0)
+                # System User tokens have expires_at == 0 and never expire
+                if token_type == "SYSTEM_USER" or expires_at == 0:
+                    days_left = 9999
+                else:
+                    import time
+                    days_left = max(0, int((expires_at - time.time()) / 86400))
+                return {
+                    "is_valid":   is_valid,
+                    "expires_at": expires_at,
+                    "days_left":  days_left if is_valid else 0,
+                    "type":       token_type.lower() or "user",
+                }
+            # /debug_token returned an error (app_id mismatch, etc.) — fall through
+        except Exception:
+            pass
+
+    # ── Fall back to /me — works for any token type ───────────────────────────
     resp = requests.get(
         f"{META_API}/me",
         params={"access_token": token, "fields": "id,name"},
@@ -54,9 +87,10 @@ def check_token_info(token: str, app_id: str = "", app_secret: str = "") -> dict
     )
     data = resp.json()
     if "error" in data:
-        return {"is_valid": False, "expires_at": 0, "type": "unknown"}
-    # System user tokens and non-expiring tokens have no expiry — treat as permanent
-    return {"is_valid": True, "expires_at": 0, "type": "system_user"}
+        return {"is_valid": False, "expires_at": 0, "days_left": 0, "type": "unknown"}
+    # /me succeeded but we can't determine expiry without /debug_token + app creds.
+    # Return days_left=None to signal "valid but unknown expiry" — do not auto-refresh.
+    return {"is_valid": True, "expires_at": 0, "days_left": None, "type": "unknown"}
 
 
 def exchange_for_long_lived(token: str, app_id: str, app_secret: str) -> str | None:
@@ -110,9 +144,9 @@ def refresh_if_needed() -> dict:
     if not token:
         return {"status": "no_credentials", "days_left": 0, "message": "META_ACCESS_TOKEN not set"}
 
-    # ── Inspect token (works without app credentials) ─────────────────────────
+    # ── Inspect token — pass app creds so /debug_token returns real expiry ───────
     try:
-        info = check_token_info(token)
+        info = check_token_info(token, app_id, app_secret)
     except Exception as exc:
         return {"status": "error", "days_left": 0, "message": f"Token check failed: {exc}"}
 
@@ -125,17 +159,22 @@ def refresh_if_needed() -> dict:
         return {
             "status":    "expired",
             "days_left": 0,
-            "message":   "Token expired and automatic refresh failed (app credentials may not match token issuer)",
+            "message":   (
+                "Token expired and automatic refresh failed.\n"
+                "Generate a new System User token in Meta Business Manager:\n"
+                "  Business Settings → Users → System Users → Generate New Token\n"
+                "Then update META_ACCESS_TOKEN in .env"
+            ),
         }
 
-    expires_at = info.get("expires_at", 0)
+    days_left = info.get("days_left")  # None = valid but expiry unknown (no app creds)
+    log.info("Token is valid — %s days remaining",
+             "∞" if days_left is None or days_left >= 9999 else days_left)
 
-    # Tokens issued as non-expiring (e.g. system-user tokens, page tokens)
-    if expires_at == 0:
-        return {"status": "ok", "days_left": 9999, "message": "Token does not expire"}
-
-    days_left = max(0, int((expires_at - time.time()) / 86400))
-    log.info("Token is valid — %d days remaining", days_left)
+    # Non-expiring (System User) or expiry unknown without app creds — skip refresh
+    if days_left is None or days_left >= 9999:
+        label = "System User (non-expiring)" if info.get("type") == "system_user" else "expiry unknown — add META_APP_ID/SECRET for full tracking"
+        return {"status": "ok", "days_left": days_left, "message": f"Token valid — {label}"}
 
     if days_left <= REFRESH_THRESHOLD_DAYS:
         log.info("Threshold reached (%d days) — exchanging for new 60-day token", days_left)
@@ -149,7 +188,7 @@ def refresh_if_needed() -> dict:
                 "message": f"Auto-refresh failed — token still valid for {days_left} days"}
 
     return {"status": "ok", "days_left": days_left,
-            "message": f"Token valid for {days_left} more days"}
+            "message": f"Token valid — {days_left} days remaining"}
 
 
 # ── Standalone run ────────────────────────────────────────────────────────────
