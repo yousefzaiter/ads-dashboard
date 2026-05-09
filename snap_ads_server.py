@@ -235,7 +235,11 @@ def fetch_snap_accounts(token: str) -> list[dict]:
                 if ad.get("status") == "ACTIVE":
                     accounts.append({"id": ad["id"], "name": ad.get("name", ad["id"])})
         return accounts
-    except RuntimeError:
+    except RuntimeError as e:
+        print(f"[Snap] API Error: {str(e)[:200]}")
+        return []
+    except Exception as e:
+        print(f"[Snap] Unexpected error: {str(e)[:200]}")
         return []
 
 
