@@ -1731,13 +1731,20 @@ if _snap_token:
             fetch_snap_adsets, fetch_snap_ads,
         )
         _snap_ready = True
-    except Exception:
+    except Exception as _snap_import_err:
+        print(f"[Snap] Import error: {_snap_import_err}")
         _snap_token = ""
 
 if _snap_ready:
     try:
         _snap_accounts = fetch_snap_accounts(_snap_token)
-    except Exception:
+        print("[Snap] Available ad accounts:")
+        for _a in _snap_accounts:
+            print(f"  {_a['id']}  →  {_a.get('name', 'N/A')}")
+        if not _snap_accounts:
+            print("[Snap] No active ad accounts returned for this token.")
+    except Exception as _snap_acct_err:
+        print(f"[Snap] Failed to fetch ad accounts: {_snap_acct_err}")
         _snap_accounts = []
 
 # ── TikTok pre-fetch ──────────────────────────────────────────────────────────
