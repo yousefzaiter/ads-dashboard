@@ -1,34 +1,73 @@
 import hashlib
 import json
+import logging
 import os
+
+try:
+    import bcrypt  # type: ignore
+    _BCRYPT_AVAILABLE = True
+except ImportError:  # bcrypt not installed yet (older envs)
+    _BCRYPT_AVAILABLE = False
+
+log = logging.getLogger(__name__)
 
 _CLIENTS_FILE = os.path.join(os.path.dirname(__file__), "clients.json")
 
 
-def _hash(password: str) -> str:
+def _legacy_sha256(password: str) -> str:
+    """Legacy unsalted SHA256 hash — kept only to verify pre-bcrypt records."""
     return hashlib.sha256(password.strip().encode()).hexdigest()
 
 
-# role "admin"  → sees all clients, can switch between them
-# role "client" → locked to their assigned client_id (10-digit Google Ads ID, no dashes)
-USERS: dict[str, dict] = {
-    "yousef": {
-        "password_hash": _hash("0592263833"),
-        "role": "admin",
-        "client_id": None,
-    },
-}
+def hash_password(password: str) -> str:
+    """Create a new password hash. Prefers bcrypt, falls back to legacy SHA256."""
+    pw = password.strip().encode()
+    if _BCRYPT_AVAILABLE:
+        return bcrypt.hashpw(pw, bcrypt.gensalt()).decode()
+    return _legacy_sha256(password)
+
+
+def _looks_like_bcrypt(stored_hash: str) -> bool:
+    return isinstance(stored_hash, str) and stored_hash.startswith(("$2a$", "$2b$", "$2y$"))
+
+
+def _verify_hash(password: str, stored_hash: str) -> bool:
+    if not stored_hash:
+        return False
+    if _looks_like_bcrypt(stored_hash) and _BCRYPT_AVAILABLE:
+        try:
+            return bcrypt.checkpw(password.strip().encode(), stored_hash.encode())
+        except (ValueError, TypeError):
+            return False
+    # Legacy SHA256 fallback (for unmigrated records)
+    return _legacy_sha256(password) == stored_hash
+
+
+def _admin_users() -> dict[str, dict]:
+    """Admin users are loaded from env. Set ADMIN_USERNAME + ADMIN_PASSWORD_HASH.
+    ADMIN_PASSWORD_HASH accepts a bcrypt hash (preferred) or legacy SHA256 hex."""
+    username = os.getenv("ADMIN_USERNAME", "").strip()
+    pw_hash = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
+    if username and pw_hash:
+        return {
+            username: {
+                "password_hash": pw_hash,
+                "role": "admin",
+                "client_id": None,
+            }
+        }
+    return {}
 
 
 def _load_all_users() -> dict[str, dict]:
-    """Merge hardcoded admins with active clients from clients.json."""
-    merged = dict(USERS)
+    """Merge env-configured admins with active clients from clients.json."""
+    merged = dict(_admin_users())
     try:
         if os.path.exists(_CLIENTS_FILE):
             with open(_CLIENTS_FILE, encoding="utf-8") as f:
                 data = json.load(f)
             clients = data.get("clients", [])
-            print(f"[auth] clients.json found: {len(clients)} client(s)")
+            log.info("clients.json found: %d client(s)", len(clients))
             for c in clients:
                 if not c.get("active", True):
                     continue
@@ -41,25 +80,21 @@ def _load_all_users() -> dict[str, dict]:
                         "display_name": c.get("display_name", uname),
                     }
         else:
-            print(f"[auth] clients.json not found at {_CLIENTS_FILE}")
+            log.info("clients.json not found at %s", _CLIENTS_FILE)
     except Exception as e:
-        print(f"[auth] error reading clients.json: {e}")
+        log.warning("error reading clients.json: %s", e)
     return merged
 
 
 def verify_password(username: str, password: str) -> bool:
     all_users = _load_all_users()
     user = all_users.get(username)
-    print(f"[auth] login attempt: username={username!r}, known_users={list(all_users.keys())}")
     if not user:
-        print(f"[auth] username not found")
+        log.info("login: unknown username")
         return False
-    input_hash = _hash(password)
-    stored_hash = user["password_hash"]
-    print(f"[auth] input_hash={input_hash}")
-    print(f"[auth] stored_hash={stored_hash}")
-    print(f"[auth] match={input_hash == stored_hash}")
-    return input_hash == stored_hash
+    ok = _verify_hash(password, user.get("password_hash", ""))
+    log.info("login: result=%s", "ok" if ok else "fail")
+    return ok
 
 
 def get_user(username: str) -> dict:

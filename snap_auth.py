@@ -12,31 +12,43 @@ Flow:
 import base64
 import os
 import re
+import secrets
 import sys
 import webbrowser
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
+from dotenv import load_dotenv
 
-# ── Credentials ───────────────────────────────────────────────────────────────
-CLIENT_ID     = "9f24e0ad-fdd0-4c8c-8b92-ca9f8e26cd77"
-CLIENT_SECRET = "f4f2c54fa34ca552b572"
-REDIRECT_URI  = "https://ads-dashboard.yousefzaiter.com"
+load_dotenv()
+
+# ── Credentials (loaded from environment) ────────────────────────────────────
+CLIENT_ID     = os.getenv("SNAP_CLIENT_ID", "")
+CLIENT_SECRET = os.getenv("SNAP_CLIENT_SECRET", "")
+REDIRECT_URI  = os.getenv("SNAP_REDIRECT_URI", "https://ads-dashboard.yousefzaiter.com")
 SCOPE         = "snapchat-marketing-api"
+
+if not CLIENT_ID or not CLIENT_SECRET:
+    print("\n✗ SNAP_CLIENT_ID and SNAP_CLIENT_SECRET must be set in .env")
+    print("  Get them from https://kit.snapchat.com/portal")
+    sys.exit(1)
 
 AUTH_URL  = "https://accounts.snapchat.com/login/oauth2/authorize"
 TOKEN_URL = "https://accounts.snapchat.com/login/oauth2/access_token"
 ENV_PATH  = Path(__file__).parent / ".env"
 
 
-# ── Step 1: build authorization URL ──────────────────────────────────────────
+# ── Step 1: build authorization URL with CSRF state ──────────────────────────
+
+OAUTH_STATE = secrets.token_urlsafe(32)
 
 params = {
     "client_id":     CLIENT_ID,
     "redirect_uri":  REDIRECT_URI,
     "response_type": "code",
     "scope":         SCOPE,
+    "state":         OAUTH_STATE,
 }
 auth_url = f"{AUTH_URL}?{urlencode(params)}"
 
@@ -62,11 +74,18 @@ if raw.startswith("http"):
     parsed = urlparse(raw)
     qs     = parse_qs(parsed.query)
     code   = qs.get("code", [None])[0]
+    returned_state = qs.get("state", [None])[0]
     if not code:
         print("\n✗ Could not find 'code' in URL. Make sure you copied the full redirect URL.")
         sys.exit(1)
+    if returned_state != OAUTH_STATE:
+        print("\n✗ OAuth state mismatch — possible CSRF attempt. Aborting.")
+        print(f"  expected: {OAUTH_STATE[:12]}…  got: {(returned_state or '')[:12]}…")
+        sys.exit(1)
 else:
-    code = raw  # assume bare code was pasted
+    code = raw  # bare code: state cannot be validated, warn the user
+    print("\n⚠️  Bare code pasted — OAuth state could not be validated.")
+    print("    For full CSRF protection, paste the full redirect URL next time.")
 
 print(f"\n  Code captured: {code[:12]}…")
 

@@ -63,11 +63,13 @@ def check_token_info(token: str, app_id: str = "", app_secret: str = "") -> dict
                 is_valid   = bool(d.get("is_valid", False))
                 token_type = str(d.get("type", "")).upper()
                 expires_at = int(d.get("expires_at", 0) or 0)
-                # System User tokens have expires_at == 0 and never expire
-                if token_type == "SYSTEM_USER" or expires_at == 0:
+                # Only true System User tokens are treated as permanent.
+                # expires_at <= 0 alone is ambiguous (could be API hiccup) — signal unknown.
+                if token_type == "SYSTEM_USER":
                     days_left = 9999
+                elif expires_at <= 0:
+                    days_left = None
                 else:
-                    import time
                     days_left = max(0, int((expires_at - time.time()) / 86400))
                 return {
                     "is_valid":   is_valid,
@@ -76,8 +78,8 @@ def check_token_info(token: str, app_id: str = "", app_secret: str = "") -> dict
                     "type":       token_type.lower() or "user",
                 }
             # /debug_token returned an error (app_id mismatch, etc.) — fall through
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("debug_token call failed, falling back to /me: %s", e)
 
     # ── Fall back to /me — works for any token type ───────────────────────────
     resp = requests.get(
@@ -113,12 +115,16 @@ def exchange_for_long_lived(token: str, app_id: str, app_secret: str) -> str | N
 
 
 def save_token(new_token: str) -> None:
-    """Overwrite META_ACCESS_TOKEN in .env and in the running process."""
-    content = ENV_PATH.read_text()
+    """Overwrite META_ACCESS_TOKEN in .env atomically and update the process env."""
+    content = ENV_PATH.read_text() if ENV_PATH.exists() else ""
     new_content = re.sub(r"META_ACCESS_TOKEN=\S*", f"META_ACCESS_TOKEN={new_token}", content)
     if "META_ACCESS_TOKEN=" not in new_content:
-        new_content += f"\nMETA_ACCESS_TOKEN={new_token}\n"
-    ENV_PATH.write_text(new_content)
+        new_content = new_content.rstrip("\n") + f"\nMETA_ACCESS_TOKEN={new_token}\n"
+    # Atomic write: write to a temp file in the same directory, then rename.
+    # Prevents a partial .env if the process is killed mid-write.
+    tmp_path = ENV_PATH.with_suffix(ENV_PATH.suffix + ".tmp")
+    tmp_path.write_text(new_content)
+    os.replace(tmp_path, ENV_PATH)
     os.environ["META_ACCESS_TOKEN"] = new_token
     log.info("Token saved to .env and os.environ updated")
 

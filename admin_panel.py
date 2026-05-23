@@ -1,18 +1,19 @@
-import hashlib
+import html
 import json
+import logging
 import os
 from datetime import datetime
 
 import streamlit as st
 
+from users import hash_password
+
 CLIENTS_FILE = os.path.join(os.path.dirname(__file__), "clients.json")
+
+log = logging.getLogger(__name__)
 
 
 # ── Storage helpers ───────────────────────────────────────────────────────────
-
-def _hash(password: str) -> str:
-    return hashlib.sha256(password.strip().encode()).hexdigest()
-
 
 def load_clients() -> list[dict]:
     if not os.path.exists(CLIENTS_FILE):
@@ -20,7 +21,8 @@ def load_clients() -> list[dict]:
     try:
         with open(CLIENTS_FILE, encoding="utf-8") as f:
             return json.load(f).get("clients", [])
-    except Exception:
+    except Exception as e:
+        log.warning("failed to load clients.json: %s", e)
         return []
 
 
@@ -30,9 +32,11 @@ def save_clients(clients: list[dict]) -> None:
 
 
 def _all_usernames() -> set:
-    """All taken usernames — hardcoded admins + saved clients."""
-    from users import USERS
-    names = set(USERS.keys())
+    """All taken usernames — admin (from env) + saved clients."""
+    names = set()
+    admin = os.getenv("ADMIN_USERNAME", "").strip()
+    if admin:
+        names.add(admin)
     for c in load_clients():
         names.add(c["username"])
     return names
@@ -44,7 +48,7 @@ def _all_usernames() -> set:
 def _edit_dialog(client: dict) -> None:
     st.markdown(
         f"<div style='font-size:12px;color:rgba(255,255,255,0.4);margin-bottom:18px'>"
-        f"Username: <b style='color:#f0f6fc'>{client['username']}</b></div>",
+        f"Username: <b style='color:#f0f6fc'>{html.escape(client['username'])}</b></div>",
         unsafe_allow_html=True,
     )
 
@@ -79,7 +83,7 @@ def _edit_dialog(client: dict) -> None:
                 clients[i]["snap_account_id"]= new_snap.strip()
                 clients[i]["active"]         = active
                 if new_pass.strip():
-                    clients[i]["password_hash"] = _hash(new_pass.strip())
+                    clients[i]["password_hash"] = hash_password(new_pass.strip())
                 clients[i]["updated_at"] = datetime.utcnow().isoformat()
                 break
         save_clients(clients)
@@ -138,7 +142,7 @@ def _tab_add() -> None:
                 clients = load_clients()
                 clients.append({
                     "username":        username.strip(),
-                    "password_hash":   _hash(password.strip()),
+                    "password_hash":   hash_password(password.strip()),
                     "display_name":    display_name.strip(),
                     "client_id":       client_id.strip().replace("-", ""),
                     "meta_account_id": meta_account_id.strip().replace("act_", ""),
@@ -190,16 +194,16 @@ def _tab_list() -> None:
 
         row[0].markdown(
             f"<div style='font-size:13px;font-weight:600;color:#e6edf3;"
-            f"padding-top:5px'>{client.get('display_name', client['username'])}</div>",
+            f"padding-top:5px'>{html.escape(client.get('display_name', client['username']))}</div>",
             unsafe_allow_html=True)
         row[1].markdown(
             f"<div style='font-size:12px;color:rgba(255,255,255,0.4);"
-            f"padding-top:6px'>{client['username']}</div>",
+            f"padding-top:6px'>{html.escape(client['username'])}</div>",
             unsafe_allow_html=True)
         row[2].markdown(
             f"<div style='font-size:11px;font-family:monospace;"
             f"color:rgba(255,255,255,0.35);padding-top:6px'>"
-            f"{client.get('client_id') or '—'}</div>",
+            f"{html.escape(client.get('client_id') or '—')}</div>",
             unsafe_allow_html=True)
         row[3].markdown(
             f"<div style='font-size:11px;font-weight:600;color:{sc};"
@@ -221,7 +225,7 @@ def _tab_list() -> None:
                 f"align-items:center;gap:12px'>"
                 f"<span style='font-size:12.5px;color:rgba(255,255,255,0.6);flex:1'>"
                 f"Delete <b style='color:#f0f6fc'>"
-                f"{client.get('display_name', client['username'])}</b>?"
+                f"{html.escape(client.get('display_name', client['username']))}</b>?"
                 f" This cannot be undone.</span></div>",
                 unsafe_allow_html=True)
             dc1, dc2, dc3 = st.columns([3.6, 0.8, 0.8])

@@ -8,10 +8,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from datetime import datetime, timedelta
+import logging
 
 _CLIENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clients.json")
 
-_SNAP_SAR = 3.75   # Snap returns monetary values in USD; multiply to display in SAR
+_SNAP_SAR = float(os.getenv("USD_TO_SAR", "3.75"))   # Snap returns monetary values in USD; multiply to display in SAR
 
 
 def _snap_to_sar(df: pd.DataFrame) -> pd.DataFrame:
@@ -1190,8 +1191,8 @@ def _fetch_ads_level1(proj: dict, start: str, end: str, fetch_google=None) -> pd
             gdf = fetch_google(cid, start, end)
             if not gdf.empty:
                 frames.append(_normalise_df(gdf, "google"))
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.getLogger(__name__).debug('suppressed: %s', _exc)
 
     # Meta
     acct = plat_cfg.get("meta", {}).get("ad_account_id", "").strip()
@@ -1203,8 +1204,8 @@ def _fetch_ads_level1(proj: dict, start: str, end: str, fetch_google=None) -> pd
                 mdf = fetch_meta_campaigns(token, acct, start, end)
                 if not mdf.empty:
                     frames.append(_normalise_df(mdf, "meta"))
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.getLogger(__name__).debug('suppressed: %s', _exc)
 
     # Snap
     sacct = plat_cfg.get("snap", {}).get("ad_account_id", "").strip()
@@ -1216,8 +1217,8 @@ def _fetch_ads_level1(proj: dict, start: str, end: str, fetch_google=None) -> pd
                 sdf = _snap_to_sar(fetch_snap_campaigns(stoken, sacct, start, end))
                 if not sdf.empty:
                     frames.append(_normalise_df(sdf, "snap"))
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.getLogger(__name__).debug('suppressed: %s', _exc)
 
     if not frames:
         return pd.DataFrame()
@@ -1245,8 +1246,8 @@ def _fetch_ads_level2(proj: dict, platform: str, campaign_id: str,
             if token:
                 df = fetch_meta_adsets(token, campaign_id, start, end)
                 return _normalise_df(df, "meta") if not df.empty else pd.DataFrame()
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.getLogger(__name__).debug('suppressed: %s', _exc)
 
     if platform == "snap":
         acct = plat_cfg.get("snap", {}).get("ad_account_id", "").strip()
@@ -1256,8 +1257,8 @@ def _fetch_ads_level2(proj: dict, platform: str, campaign_id: str,
             if stoken:
                 df = _snap_to_sar(fetch_snap_adsets(stoken, campaign_id, start, end, acct))
                 return _normalise_df(df, "snap") if not df.empty else pd.DataFrame()
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.getLogger(__name__).debug('suppressed: %s', _exc)
 
     return pd.DataFrame()
 
@@ -1283,8 +1284,8 @@ def _fetch_ads_level3(proj: dict, platform: str, adset_id: str,
             if token:
                 df = fetch_meta_ads_list(token, adset_id, start, end)
                 return _normalise_df(df, "meta") if not df.empty else pd.DataFrame()
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.getLogger(__name__).debug('suppressed: %s', _exc)
 
     if platform == "snap":
         acct = plat_cfg.get("snap", {}).get("ad_account_id", "").strip()
@@ -1294,8 +1295,8 @@ def _fetch_ads_level3(proj: dict, platform: str, adset_id: str,
             if stoken:
                 df = _snap_to_sar(fetch_snap_ads(stoken, adset_id, start, end, acct))
                 return _normalise_df(df, "snap") if not df.empty else pd.DataFrame()
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.getLogger(__name__).debug('suppressed: %s', _exc)
 
     return pd.DataFrame()
 
@@ -1797,8 +1798,8 @@ def _fetch_creative_analysis_data(
                     mdf["_Status"]   = mdf["Status"].fillna("PAUSED")
                     mdf["_CPM"]      = mdf.get("CPM", 0).fillna(0)
                     frames.append(mdf)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.getLogger(__name__).debug('suppressed: %s', _exc)
 
     # ── Snap ──────────────────────────────────────────────────────────────────
     snap_acct = plat_cfg.get("snap", {}).get("ad_account_id", "").strip()
@@ -1823,8 +1824,8 @@ def _fetch_creative_analysis_data(
                     if "Reach" not in sdf.columns:
                         sdf["Reach"] = 0
                     frames.append(sdf)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.getLogger(__name__).debug('suppressed: %s', _exc)
 
     if not frames:
         result = pd.DataFrame()
@@ -2145,13 +2146,13 @@ def _render_creative_analysis(
             try:
                 from meta_ads_server import fetch_meta_all_ads
                 fetch_meta_all_ads.clear()
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.getLogger(__name__).debug('suppressed: %s', _exc)
             try:
                 from snap_ads_server import fetch_snap_all_ads
                 fetch_snap_all_ads.clear()
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.getLogger(__name__).debug('suppressed: %s', _exc)
             st.rerun()
 
     # ── Fetch data ────────────────────────────────────────────────────────────
@@ -2421,8 +2422,14 @@ def _fetch_and_aggregate(proj: dict, start: str, end: str,
             for plat in active_plats
         }
         for future in as_completed(futures):
-            plat_key, result = future.result()
-            platform_results[plat_key] = result
+            plat_name = futures[future]
+            try:
+                plat_key, result = future.result(timeout=60)
+                platform_results[plat_key] = result
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "platform fetch failed for %s: %s", plat_name, e)
+                # Skip this platform's results — the rest still load.
 
     wall_elapsed = time.perf_counter() - t_wall
     print(f"[perf] total wall time ({len(active_plats)} platforms parallel): {wall_elapsed:.2f}s")

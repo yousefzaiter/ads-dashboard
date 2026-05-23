@@ -1,37 +1,26 @@
 [project]
-name = "mcp-google-ads"
-version = "0.1.0"
-description = "Google Ads API integration for Model Context Protocol (MCP)"
+name = "ads-dashboard"
+version = "0.2.0"
+description = "Multi-platform ads dashboard (Google Ads, Meta, Snap, TikTok) built on Streamlit"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-authors = [
-    {name = "Ernesto Cohnen", email = "ernesto@ixigo.com"}
-]
-keywords = ["mcp", "google ads", "seo", "sem", "claude","search analytics"]
+keywords = ["google ads", "meta ads", "snap ads", "tiktok ads", "streamlit", "dashboard", "mcp"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
-    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
-    "Topic :: Software Development :: Libraries :: Python Modules"
 ]
+# Runtime dependencies are managed in requirements.txt (used by Procfile).
+# This list is the minimal set needed to import the MCP servers as a library.
 dependencies = [
+    "mcp[cli]>=1.3.0",
     "google-api-python-client>=2.163.0",
     "google-auth-httplib2>=0.2.0",
     "google-auth-oauthlib>=1.2.1",
-    "mcp[cli]>=1.3.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "bcrypt>=4.0.0",
 ]
-
-[project.urls]
-"Homepage" = "https://github.com/cohnen/mcp-google-ads"
-"Bug Tracker" = "https://github.com/cohnen/mcp-google-ads/issues"
-
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-packages = ["mcp_google_ads"]

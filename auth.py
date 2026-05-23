@@ -1,35 +1,60 @@
-import uuid
+import os
+import secrets
+import time
 import streamlit as st
 from users import verify_password
+import logging
+
+# Session lifetime in seconds (default 12 hours)
+SESSION_TTL = int(os.getenv("SESSION_TTL_SECONDS", "43200"))
 
 
 @st.cache_resource
 def _session_store() -> dict:
-    """Shared in-memory {token: username} store.
+    """Shared in-memory {token: (username, expires_at)} store.
     Survives page reruns and multi-user sessions. Lost only on server restart.
     """
     return {}
 
 
+def _is_valid(token: str) -> str | None:
+    """Return username if the token is valid and not expired, else None.
+    Expired tokens are cleaned up from the store."""
+    entry = _session_store().get(token)
+    if not entry:
+        return None
+    username, expires_at = entry
+    if time.time() > expires_at:
+        _session_store().pop(token, None)
+        return None
+    return username
+
+
 def check_auth() -> bool:
-    """Read the token from the URL query param or session_state and validate it.
-    Storing the token in session_state lets us clear the URL for a cleaner client
-    experience without breaking the session on subsequent reruns.
+    """Read the token from session_state (preferred) or URL query param and
+    validate it. Once read from the URL we move it to session_state and clear
+    the URL so the token doesn't leak via referrers, browser history, or logs.
     """
-    token = st.query_params.get("token", "") or st.session_state.get("_auth_token", "")
+    token = st.session_state.get("_auth_token", "") or st.query_params.get("token", "")
     if not token:
         return False
-    username = _session_store().get(token)
+    username = _is_valid(token)
     if username:
         st.session_state["username"] = username
-        st.session_state["_auth_token"] = token  # persist so URL can be cleared
+        st.session_state["_auth_token"] = token
+        # Strip the token from the URL immediately for every user
+        if "token" in st.query_params:
+            try:
+                del st.query_params["token"]
+            except Exception as _exc:
+                logging.getLogger(__name__).debug('suppressed: %s', _exc)
         return True
     return False
 
 
 def do_logout() -> None:
     """Invalidate the session token, clear the URL, and rerun."""
-    token = st.query_params.get("token", "") or st.session_state.get("_auth_token", "")
+    token = st.session_state.get("_auth_token", "") or st.query_params.get("token", "")
     _session_store().pop(token, None)
     st.session_state.pop("username", None)
     st.session_state.pop("_auth_token", None)
@@ -90,10 +115,10 @@ def show_login_page() -> None:
 
         if submitted:
             if verify_password(username, password):
-                token = uuid.uuid4().hex
-                _session_store()[token] = username
+                token = secrets.token_urlsafe(32)
+                _session_store()[token] = (username, time.time() + SESSION_TTL)
                 st.session_state["username"] = username
-                st.query_params["token"] = token
+                st.session_state["_auth_token"] = token
                 st.rerun()
             else:
                 st.error("Invalid username or password.")

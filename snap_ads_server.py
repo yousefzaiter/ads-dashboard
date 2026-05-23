@@ -12,6 +12,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+import logging
 
 load_dotenv(
     dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
@@ -21,7 +22,7 @@ load_dotenv(
 SNAP_API    = "https://adsapi.snapchat.com/v1"
 TOKEN_URL   = "https://accounts.snapchat.com/login/oauth2/access_token"
 _ENV_PATH   = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-USD_TO_SAR  = 3.75
+USD_TO_SAR  = float(os.getenv("USD_TO_SAR", "3.75"))
 
 _STAT_FIELDS = ",".join([
     "impressions", "swipes", "spend",
@@ -535,8 +536,8 @@ def fetch_snap_all_ads(token: str, account_id: str, start: str, end: str,
         for fut in as_completed(futs):
             try:
                 rows.append(fut.result())
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.getLogger(__name__).debug('suppressed: %s', _exc)
 
     if not rows:
         return pd.DataFrame()

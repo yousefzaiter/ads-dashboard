@@ -1,7 +1,10 @@
+import html
 import io
 import json
+import logging
 import os
 import smtplib
+import traceback
 import urllib.parse
 import requests
 import pandas as pd
@@ -262,8 +265,8 @@ def _meta_id_for_google(google_cid: str) -> str:
             for _c in json.load(_f).get("clients", []):
                 if _c.get("client_id", "").replace("-", "") == google_cid.replace("-", ""):
                     return _c.get("meta_account_id", "")
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.getLogger(__name__).debug('suppressed: %s', _exc)
     return ""
 
 
@@ -274,8 +277,8 @@ def _snap_id_for_google(google_cid: str) -> str:
             for _c in json.load(_f).get("clients", []):
                 if _c.get("client_id", "").replace("-", "") == google_cid.replace("-", ""):
                     return _c.get("snap_account_id", "")
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.getLogger(__name__).debug('suppressed: %s', _exc)
     return ""
 
 
@@ -355,8 +358,8 @@ def _register_arabic_font() -> str:
             fh.write(r.content)
         pdfmetrics.registerFont(TTFont("ArabicFont", local))
         _ar_font_name = "ArabicFont"
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.getLogger(__name__).debug('suppressed: %s', _exc)
     return _ar_font_name
 
 
@@ -807,24 +810,68 @@ def send_modal(pdf_bytes: bytes, client_name: str,
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
+class GoogleAuthError(RuntimeError):
+    """Raised when the Google OAuth refresh fails. Carries the parsed error
+    code from Google so callers can render an actionable message."""
+
+    def __init__(self, code: str, description: str):
+        self.code = code
+        self.description = description
+        super().__init__(f"{code}: {description}")
+
+
 @st.cache_resource(ttl=3500)
 def get_access_token():
+    """Refresh and return a Google Ads access token. Raises GoogleAuthError on
+    bad credentials so the UI can surface Google's actual reason."""
+    # Prefer process env (so platform-level env vars on Heroku/Render work),
+    # fall back to .env file for local dev.
+    env: dict[str, str] = {}
     env_path = os.path.join(os.path.dirname(__file__), ".env")
-    env = {}
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip()
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    env[k.strip()] = v.strip()
+    # process env wins over .env (matches load_dotenv override=False behavior)
+    for key in ("GOOGLE_ADS_CLIENT_ID", "GOOGLE_ADS_CLIENT_SECRET",
+                "GOOGLE_ADS_REFRESH_TOKEN", "GOOGLE_ADS_DEVELOPER_TOKEN",
+                "GOOGLE_ADS_CUSTOMER_ID", "GOOGLE_ADS_LOGIN_CUSTOMER_ID"):
+        v = os.getenv(key)
+        if v:
+            env[key] = v
+
+    missing = [k for k in ("GOOGLE_ADS_CLIENT_ID", "GOOGLE_ADS_CLIENT_SECRET",
+                            "GOOGLE_ADS_REFRESH_TOKEN", "GOOGLE_ADS_DEVELOPER_TOKEN")
+               if not env.get(k)]
+    if missing:
+        raise GoogleAuthError(
+            "missing_credentials",
+            f"Missing required env vars: {', '.join(missing)}",
+        )
+
     resp = requests.post("https://oauth2.googleapis.com/token", data={
         "client_id":     env["GOOGLE_ADS_CLIENT_ID"],
         "client_secret": env["GOOGLE_ADS_CLIENT_SECRET"],
         "refresh_token": env["GOOGLE_ADS_REFRESH_TOKEN"],
         "grant_type":    "refresh_token",
-    })
-    resp.raise_for_status()
-    return (resp.json()["access_token"],
+    }, timeout=15)
+    if resp.status_code != 200:
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        code = body.get("error", f"http_{resp.status_code}")
+        description = body.get("error_description", resp.text[:200])
+        raise GoogleAuthError(code, description)
+    try:
+        data = resp.json()
+        access_token = data["access_token"]
+    except (KeyError, ValueError) as e:
+        raise GoogleAuthError("malformed_response", str(e))
+    return (access_token,
             env["GOOGLE_ADS_DEVELOPER_TOKEN"],
             env.get("GOOGLE_ADS_CUSTOMER_ID", "").replace("-", ""),
             env.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "").replace("-", ""))
@@ -833,40 +880,50 @@ def get_access_token():
 # ── Client list from API ──────────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_clients(token: str, dev_token: str, root_cid: str, mcc_id: str) -> dict[str, str]:
-    """Return {descriptive_name: customer_id} for all client accounts under the MCC."""
+    """Return {descriptive_name: customer_id} for all client accounts under the MCC.
+    Follows nextPageToken so MCCs with many clients are paged fully."""
     clients: dict[str, str] = {}
     mcc_id = mcc_id.replace("-", "").strip()
+    url = f"https://googleads.googleapis.com/v20/customers/{mcc_id}/googleAds:search"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "developer-token": dev_token,
+        "content-type": "application/json",
+        "login-customer-id": mcc_id,
+    }
+    query = """
+        SELECT
+          customer_client.client_customer,
+          customer_client.descriptive_name,
+          customer_client.manager,
+          customer_client.status
+        FROM customer_client
+        WHERE customer_client.manager = FALSE
+        AND customer_client.status = 'ENABLED'
+    """
+    page_token = None
     try:
-        r = requests.post(
-            f"https://googleads.googleapis.com/v20/customers/{mcc_id}/googleAds:search",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "developer-token": dev_token,
-                "content-type": "application/json",
-                "login-customer-id": mcc_id,
-            },
-            json={
-                "query": """
-                    SELECT
-                      customer_client.client_customer,
-                      customer_client.descriptive_name,
-                      customer_client.manager,
-                      customer_client.status
-                    FROM customer_client
-                    WHERE customer_client.manager = FALSE
-                    AND customer_client.status = 'ENABLED'
-                """
-            },
-            timeout=10,
-        )
-        if r.status_code == 200:
-            for row in r.json().get("results", []):
+        # Cap pages so a bad token can't loop forever.
+        for _ in range(50):
+            payload: dict = {"query": query}
+            if page_token:
+                payload["pageToken"] = page_token
+            r = requests.post(url, headers=headers, json=payload, timeout=15)
+            if r.status_code != 200:
+                logging.getLogger(__name__).warning(
+                    "fetch_clients HTTP %s: %s", r.status_code, r.text[:200])
+                break
+            body = r.json()
+            for row in body.get("results", []):
                 client = row["customerClient"]
                 cid = client["clientCustomer"].split("/")[-1]
                 name = client.get("descriptiveName") or cid
                 clients[name] = cid
-    except Exception:
-        pass
+            page_token = body.get("nextPageToken")
+            if not page_token:
+                break
+    except Exception as _exc:
+        logging.getLogger(__name__).warning('fetch_clients failed: %s', _exc)
     return clients if clients else {root_cid: root_cid}
 
 
@@ -892,16 +949,16 @@ def gaql(query: str, customer_id: str, token: str, dev_token: str, mcc_id: str) 
             "login-customer-id": mcc_id,
         }
 
-    resp = requests.post(url, headers=_make_headers(token), json={"query": query})
+    resp = requests.post(url, headers=_make_headers(token), json={"query": query}, timeout=30)
 
     # On 401: invalidate the cached token and retry once with a fresh one
     if resp.status_code == 401:
         try:
             get_access_token.clear()
             fresh_token, _, _, _ = get_access_token()
-            resp = requests.post(url, headers=_make_headers(fresh_token), json={"query": query})
-        except Exception:
-            pass
+            resp = requests.post(url, headers=_make_headers(fresh_token), json={"query": query}, timeout=30)
+        except Exception as e:
+            print(f"[dashboard] token refresh retry failed: {e}")
 
     if resp.status_code == 401:
         st.error("⚠️ Google Ads: يرجى تجديد التوكن — انتهت صلاحية رمز الوصول")
@@ -1272,10 +1329,10 @@ def ai_decision(row: pd.Series) -> dict:
 
 def campaign_card(row: pd.Series, d: dict) -> str:
     """Render a single campaign as an HTML card with AI recommendation."""
-    name      = row["Campaign"]
+    name      = html.escape(str(row["Campaign"]))
     status    = row["Status"]
     color     = d["color"]
-    ctype     = TYPE_LABELS.get(str(row.get("Type","")).upper(), str(row.get("Type","")))
+    ctype     = html.escape(TYPE_LABELS.get(str(row.get("Type","")).upper(), str(row.get("Type",""))))
     roas_v    = d["roas"]
     cr_v      = d.get("conv_rate", 0)
 
@@ -1498,7 +1555,7 @@ def meta_ad_analysis(row: pd.Series) -> dict:
 
 
 def meta_ad_deep_card(row: pd.Series, analysis: dict) -> str:
-    name        = str(row.get("Campaign", ""))
+    name        = html.escape(str(row.get("Campaign", "")))
     spend       = float(row.get("Cost", 0))
     impressions = int(row.get("Impressions", 0))
     clicks      = int(row.get("Clicks", 0))
@@ -1662,6 +1719,28 @@ st.session_state.setdefault("selected_project_id", None)
 # ── Auth (needed early for client list) ───────────────────────────────────────
 try:
     token, dev_token, root_cid, mcc_id = get_access_token()
+except GoogleAuthError as e:
+    # Map Google's OAuth error codes to actionable Arabic guidance
+    hints = {
+        "invalid_grant": (
+            "الـ Refresh Token منتهي الصلاحية أو ملغى. "
+            "أعد توليد GOOGLE_ADS_REFRESH_TOKEN من Google Cloud Console "
+            "(OAuth Playground أو OAuth 2.0 flow) وحدّث متغيرات البيئة."
+        ),
+        "invalid_client": (
+            "GOOGLE_ADS_CLIENT_ID أو GOOGLE_ADS_CLIENT_SECRET غير صحيحة. "
+            "تأكد أن الـ OAuth Client الذي أصدر الـ refresh_token هو نفسه المُستخدم هنا."
+        ),
+        "unauthorized_client": (
+            "الـ OAuth Client غير مصرّح له بهذا الـ scope. "
+            "تحقق من إعدادات Google Cloud Console → APIs & Services → Credentials."
+        ),
+        "missing_credentials": e.description,
+    }
+    hint = hints.get(e.code, f"{e.code}: {e.description}")
+    st.error(f"⚠️ Authentication failed — {hint}")
+    st.caption(f"Raw error: {e.code} · {e.description}")
+    st.stop()
 except Exception as e:
     st.error(f"Authentication failed: {e}")
     st.stop()
@@ -2906,7 +2985,7 @@ if _platform == "📘  Meta Ads":
 
         _camp_id   = _msc["id"]
         _camp_name = _msc["name"]
-        st.markdown(f'<div class="sec-label">Ad Sets — {_camp_name}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="sec-label">Ad Sets — {html.escape(_camp_name)}</div>', unsafe_allow_html=True)
 
         with st.spinner(""):
             _mdf_adsets = fetch_meta_adsets(_meta_token, _camp_id, start_str, end_str)
@@ -2955,7 +3034,7 @@ if _platform == "📘  Meta Ads":
 
         _adset_id   = _msa["id"]
         _adset_name = _msa["name"]
-        st.markdown(f'<div class="sec-label">Ads — {_adset_name}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="sec-label">Ads — {html.escape(_adset_name)}</div>', unsafe_allow_html=True)
 
         with st.spinner(""):
             _mdf_ads = fetch_meta_ads_list(_meta_token, _adset_id, start_str, end_str)

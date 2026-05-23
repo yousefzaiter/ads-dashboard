@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -135,7 +136,7 @@ def _section_header(title: str) -> None:
         f"<div style='font-size:11px;font-weight:700;letter-spacing:1.2px;"
         f"text-transform:uppercase;color:rgba(255,255,255,0.3);"
         f"margin:28px 0 10px;border-bottom:1px solid rgba(255,255,255,0.06);"
-        f"padding-bottom:6px'>{title}</div>",
+        f"padding-bottom:6px'>{html.escape(title)}</div>",
         unsafe_allow_html=True,
     )
 

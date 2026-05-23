@@ -11,6 +11,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+import logging
 
 load_dotenv(
     dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
@@ -18,7 +19,7 @@ load_dotenv(
 )
 
 TIKTOK_API  = "https://business-api.tiktok.com/open_api/v1.3"
-USD_TO_SAR  = 3.75
+USD_TO_SAR  = float(os.getenv("USD_TO_SAR", "3.75"))
 
 _REPORT_METRICS = [
     "spend", "impressions", "clicks", "ctr", "cpm", "cpc",
@@ -108,8 +109,8 @@ def get_tiktok_account_currency(token: str, advertiser_id: str) -> str:
         items = body.get("data", {}).get("list", [])
         if items:
             return str(items[0].get("currency", "SAR")).upper()
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.getLogger(__name__).debug('suppressed: %s', _exc)
     return "SAR"
 
 
@@ -334,8 +335,8 @@ def fetch_tiktok_advertiser_name(token: str, advertiser_id: str) -> str:
         items = body.get("data", {}).get("list", [])
         if items:
             return str(items[0].get("advertiser_name", advertiser_id))
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.getLogger(__name__).debug('suppressed: %s', _exc)
     return advertiser_id
 
 

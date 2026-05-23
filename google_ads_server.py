@@ -131,7 +131,7 @@ async def list_accounts() -> str:
               AND customer_client.status = 'ENABLED'
         """
 
-        response = requests.post(url, headers=headers, json={"query": query})
+        response = requests.post(url, headers=headers, json={"query": query}, timeout=30)
 
         if response.status_code != 200:
             return f"Error fetching MCC client accounts: {response.text}"
@@ -185,7 +185,7 @@ async def execute_gaql_query(
         url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:search"
         
         payload = {"query": query}
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
         
         if response.status_code != 200:
             return f"Error executing query: {response.text}"
@@ -390,7 +390,7 @@ async def run_gaql(
         url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:search"
         
         payload = {"query": query}
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
         
         if response.status_code != 200:
             return f"Error executing query: {response.text}"
@@ -527,7 +527,7 @@ async def get_ad_creatives(
         url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:search"
         
         payload = {"query": query}
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
         
         if response.status_code != 200:
             return f"Error retrieving ad creatives: {response.text}"
@@ -612,7 +612,7 @@ async def get_account_currency(
         url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:search"
         
         payload = {"query": query}
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
         
         if response.status_code != 200:
             return f"Error retrieving account currency: {response.text}"
@@ -833,7 +833,7 @@ async def get_image_assets(
         url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:search"
         
         payload = {"query": query}
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
 
         if response.status_code != 200:
             return f"Error retrieving image assets: {response.text}"
@@ -922,7 +922,7 @@ async def download_image_asset(
         url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:search"
         
         payload = {"query": query}
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
         
         if response.status_code != 200:
             return f"Error retrieving image asset: {response.text}"
@@ -962,7 +962,7 @@ async def download_image_asset(
             return f"Error creating output directory: {str(e)}"
         
         # Download the image
-        image_response = requests.get(image_url)
+        image_response = requests.get(image_url, timeout=30)
         if image_response.status_code != 200:
             return f"Failed to download image: HTTP {image_response.status_code}"
         
@@ -1068,7 +1068,7 @@ async def get_asset_usage(
         # First get the assets
         url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:search"
         payload = {"query": assets_query}
-        assets_response = requests.post(url, headers=headers, json=payload)
+        assets_response = requests.post(url, headers=headers, json=payload, timeout=30)
         
         if assets_response.status_code != 200:
             return f"Error retrieving assets: {assets_response.text}"
@@ -1079,7 +1079,7 @@ async def get_asset_usage(
         
         # Now get the associations
         payload = {"query": associations_query}
-        assoc_response = requests.post(url, headers=headers, json=payload)
+        assoc_response = requests.post(url, headers=headers, json=payload, timeout=30)
         
         if assoc_response.status_code != 200:
             return f"Error retrieving asset associations: {assoc_response.text}"
@@ -1220,7 +1220,7 @@ async def analyze_image_assets(
         url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:search"
         
         payload = {"query": query}
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
         
         if response.status_code != 200:
             return f"Error analyzing image assets: {response.text}"
